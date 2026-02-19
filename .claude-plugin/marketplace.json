@@ -1,0 +1,26 @@
+{
+  "name": "bio-vibing",
+  "owner": {
+    "name": "itsokay-co"
+  },
+  "metadata": {
+    "description": "Biohacking skills for wearables — advanced biometric analysis with novel metrics. Supports Oura Ring, Whoop, Fitbit, and Apple Health.",
+    "version": "4.0.0"
+  },
+  "plugins": [
+    {
+      "name": "bio-vibing",
+      "description": "Connect your wearable to Claude Code. Pull biometrics, analyze medication effects, get deep health reports. Supports Oura Ring, Whoop, Fitbit, and Apple Health.",
+      "source": "./",
+      "strict": false,
+      "skills": [
+        "./skills/connect",
+        "./skills/pull",
+        "./skills/analyze",
+        "./skills/smart-mode",
+        "./skills/weekly-report",
+        "./skills/glp1-profile"
+      ]
+    }
+  ]
+}
