@@ -14,11 +14,25 @@ from typing import Optional
 import json
 import sys
 import os
+import time
+import urllib.error
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from schema import BiometricData
 from providers import detect_provider, get_provider, list_configured_providers
 import cache
+
+
+def _fetch_with_retry(method, *args, max_retries=2):
+    """Call a provider method with retry on transient HTTP errors."""
+    for attempt in range(max_retries + 1):
+        try:
+            return method(*args)
+        except urllib.error.HTTPError as e:
+            if e.code in (429, 503) and attempt < max_retries:
+                time.sleep(2 ** attempt)
+                continue
+            raise
 
 
 def test_connection(provider_name: Optional[str] = None) -> dict:
@@ -88,7 +102,7 @@ def fetch_biometrics(
             setattr(data, attr, cached)
         else:
             try:
-                records = method(start_date, end_date)
+                records = _fetch_with_retry(method, start_date, end_date)
                 serialized = [asdict(r) for r in records]
                 setattr(data, attr, serialized)
                 if use_cache:
@@ -138,6 +152,78 @@ def fetch_biometrics(
         print("", file=sys.stderr)
 
     return data
+
+
+def fetch_biometrics_multi(
+    days: int = 14,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    use_cache: bool = True,
+) -> BiometricData:
+    """Fetch from ALL configured providers and merge by priority.
+
+    Day-keyed records: keep highest-priority per day per category.
+    Timestamp-keyed records (heartrate): merge all.
+    Priority order from BIOMETRIC_PROVIDER_PRIORITY env var or detection order.
+    """
+    configured = list_configured_providers()
+    if not configured:
+        raise ValueError("No wearable providers configured")
+
+    priority_str = os.environ.get("BIOMETRIC_PROVIDER_PRIORITY", "")
+    if priority_str:
+        priority = [p.strip() for p in priority_str.split(",") if p.strip()]
+    else:
+        priority = configured
+
+    # Fetch from each provider
+    datasets = []
+    for pname in configured:
+        try:
+            d = fetch_biometrics(
+                days=days, start_date=start_date, end_date=end_date,
+                provider_name=pname, use_cache=use_cache,
+            )
+            datasets.append((pname, d))
+        except Exception:
+            continue
+
+    if not datasets:
+        raise ValueError("All providers failed to return data")
+
+    # Use highest-priority dataset as base
+    def _priority_rank(name):
+        try:
+            return priority.index(name)
+        except ValueError:
+            return 999
+
+    datasets.sort(key=lambda x: _priority_rank(x[0]))
+    base_name, base = datasets[0]
+
+    # Merge day-keyed records from lower-priority providers (fill gaps only)
+    day_keyed = ['sleep', 'readiness', 'activity', 'stress', 'spo2',
+                 'resilience', 'body_composition', 'respiration', 'workouts']
+    for pname, d in datasets[1:]:
+        dd = asdict(d)
+        for key in day_keyed:
+            existing_days = {r.get('day') for r in getattr(base, key, [])}
+            for r in dd.get(key, []):
+                if r.get('day') not in existing_days:
+                    getattr(base, key).append(r)
+
+        # Heartrate: merge all (timestamp-keyed, no conflicts)
+        for hr in dd.get('heartrate', []):
+            base.heartrate.append(hr)
+
+        # Meals: merge all
+        for m in dd.get('meals', []):
+            base.meals.append(m)
+
+        base.warnings.extend(d.warnings)
+
+    base.provider = "multi"
+    return base
 
 
 if __name__ == "__main__":

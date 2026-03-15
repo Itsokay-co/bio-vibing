@@ -10,7 +10,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from schema import (
     UserProfile, SleepRecord, ReadinessRecord,
-    ActivityRecord, StressRecord,
+    ActivityRecord, StressRecord, HeartRateRecord, WorkoutRecord,
 )
 from providers.base import BaseProvider
 
@@ -58,7 +58,7 @@ class FitbitProvider(BaseProvider):
                 provider=self.name,
                 age=user.get("age"),
                 weight_kg=user.get("weight"),
-                height_m=user.get("height") / 100 if user.get("height") else None,  # cm to m
+                height_m=user.get("height") / 100 if user.get("height") else None,
                 biological_sex=user.get("gender"),
             )
         except Exception:
@@ -74,18 +74,21 @@ class FitbitProvider(BaseProvider):
             records.append(SleepRecord(
                 day=d.get("dateOfSleep", ""),
                 provider=self.name,
-                score=None,  # Fitbit doesn't have a composite sleep score in API
+                score=None,
                 deep_sleep_seconds=levels.get("deep", {}).get("minutes", 0) * 60 or None,
                 rem_sleep_seconds=levels.get("rem", {}).get("minutes", 0) * 60 or None,
                 light_sleep_seconds=levels.get("light", {}).get("minutes", 0) * 60 or None,
-                total_sleep_seconds=d.get("duration", 0) // 1000 or None,  # ms to seconds
+                total_sleep_seconds=d.get("duration", 0) // 1000 or None,
                 efficiency=d.get("efficiency"),
-                avg_hrv_ms=None,  # HRV is a separate endpoint
-                avg_resting_hr_bpm=None,  # HR is a separate endpoint
+                avg_hrv_ms=None,
+                avg_resting_hr_bpm=None,
                 sleep_type="long_sleep" if d.get("isMainSleep") else "nap",
+                bedtime_start=d.get("startTime"),
+                bedtime_end=d.get("endTime"),
+                awake_seconds=levels.get("wake", {}).get("minutes", 0) * 60 or None,
             ))
 
-        # Fetch HRV data separately — supplementary enrichment, don't fail the whole fetch
+        # Enrich with HRV
         try:
             hrv_data = self._request(
                 f"/1/user/-/hrv/date/{start_date}/{end_date}.json"
@@ -101,12 +104,11 @@ class FitbitProvider(BaseProvider):
                 if r.day in hrv_by_day:
                     r.avg_hrv_ms = hrv_by_day[r.day]
         except Exception:
-            pass  # HRV is optional enrichment on top of already-fetched sleep data
+            pass
 
         return records
 
     def fetch_readiness(self, start_date: str, end_date: str) -> list:
-        # Fitbit doesn't have a readiness/recovery score in the public API
         return []
 
     def fetch_activity(self, start_date: str, end_date: str) -> list:
@@ -128,10 +130,67 @@ class FitbitProvider(BaseProvider):
                     met_average=None,
                 ))
             except Exception:
-                pass  # Skip failed days, continue fetching the rest
+                pass
+            current += timedelta(days=1)
+        return records
+
+    def fetch_workouts(self, start_date: str, end_date: str) -> list:
+        """Fetch individual workout records from Fitbit activities log."""
+        records = []
+        try:
+            # Fitbit activities list uses afterDate + sort + limit pagination
+            data = self._request(
+                f"/1/user/-/activities/list.json"
+                f"?afterDate={start_date}&sort=asc&offset=0&limit=100"
+            )
+            for d in data.get("activities", []):
+                start_time = d.get("startTime", "")
+                day = d.get("startDate", start_time[:10] if start_time else "")
+                # Filter to date range
+                if day and day > end_date:
+                    break
+                duration_ms = d.get("activeDuration", d.get("duration", 0))
+                records.append(WorkoutRecord(
+                    day=day,
+                    provider=self.name,
+                    activity=d.get("activityName", "").lower().replace(" ", "_"),
+                    calories=d.get("calories"),
+                    distance_m=d.get("distance", 0) * 1000 if d.get("distanceUnit") == "Kilometer" else d.get("distance"),
+                    duration_seconds=duration_ms // 1000 if duration_ms else None,
+                    start_time=start_time or None,
+                    avg_hr_bpm=d.get("averageHeartRate"),
+                    elevation_gain_m=d.get("elevationGain"),
+                ))
+        except Exception:
+            pass
+        return records
+
+    def fetch_heartrate(self, start_date: str, end_date: str) -> list:
+        """Fetch intraday heart rate data (requires Fitbit personal app or partner access)."""
+        records = []
+        start = datetime.strptime(start_date, "%Y-%m-%d")
+        end = datetime.strptime(end_date, "%Y-%m-%d")
+        current = start
+        while current <= end:
+            day_str = current.strftime("%Y-%m-%d")
+            try:
+                data = self._request(
+                    f"/1/user/-/activities/heart/date/{day_str}/1d/5min.json"
+                )
+                dataset = (data.get("activities-heart-intraday", {})
+                           .get("dataset", []))
+                for point in dataset:
+                    time_str = point.get("time", "")
+                    records.append(HeartRateRecord(
+                        timestamp=f"{day_str}T{time_str}",
+                        provider=self.name,
+                        bpm=point.get("value"),
+                        source="awake",
+                    ))
+            except Exception:
+                pass
             current += timedelta(days=1)
         return records
 
     def fetch_stress(self, start_date: str, end_date: str) -> list:
-        # Fitbit doesn't expose stress data through the public API
         return []

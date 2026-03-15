@@ -1247,6 +1247,11 @@ def compute_sleep_transitions(sleep: list) -> dict:
         if not hypno or s.get('sleep_type') not in ('long_sleep', None):
             continue
 
+        # Validate hypnogram encoding (Oura: 1=deep, 2=light, 3=REM, 4=awake)
+        valid_chars = set(stage_names.keys())
+        if not any(c in valid_chars for c in str(hypno)[:10]):
+            continue  # Skip non-Oura encodings
+
         total_sleep_hours += len(hypno) * 5 / 60
 
         # Count transitions
@@ -1318,6 +1323,10 @@ def compute_deep_sleep_distribution(sleep: list) -> dict:
     for s in sleep:
         hypno = s.get('hypnogram_5min')
         if not hypno or s.get('sleep_type') not in ('long_sleep', None):
+            continue
+
+        # Validate encoding (Oura: 1=deep, 2=light, 3=REM, 4=awake)
+        if not any(c in '1234' for c in str(hypno)[:10]):
             continue
 
         mid = len(hypno) // 2
