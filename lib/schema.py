@@ -105,6 +105,30 @@ class WorkoutRecord:
     duration_seconds: Optional[int] = None
     start_time: Optional[str] = None
     end_time: Optional[str] = None
+    avg_hr_bpm: Optional[float] = None
+    max_hr_bpm: Optional[float] = None
+    elevation_gain_m: Optional[float] = None
+    avg_speed_mps: Optional[float] = None
+    avg_power_watts: Optional[float] = None
+
+
+@dataclass
+class BodyCompositionRecord:
+    day: str
+    provider: str
+    weight_kg: Optional[float] = None
+    body_fat_pct: Optional[float] = None
+    lean_mass_kg: Optional[float] = None
+    bmi: Optional[float] = None
+
+
+@dataclass
+class RespirationRecord:
+    day: str
+    provider: str
+    avg_respiratory_rate: Optional[float] = None  # breaths per minute
+    min_respiratory_rate: Optional[float] = None
+    max_respiratory_rate: Optional[float] = None
 
 
 @dataclass
@@ -139,6 +163,7 @@ class UserProfile:
     weight_kg: Optional[float] = None
     height_m: Optional[float] = None
     biological_sex: Optional[str] = None
+    max_hr_bpm: Optional[int] = None
 
 
 @dataclass
@@ -156,6 +181,8 @@ class BiometricData:
     tags: list = field(default_factory=list)  # list[TagRecord]
     heartrate: list = field(default_factory=list)  # list[HeartRateRecord]
     workouts: list = field(default_factory=list)  # list[WorkoutRecord]
+    body_composition: list = field(default_factory=list)  # list[BodyCompositionRecord]
+    respiration: list = field(default_factory=list)  # list[RespirationRecord]
     meals: list = field(default_factory=list)  # list[MealRecord]
     optimal_bedtime: Optional[str] = None
     warnings: list = field(default_factory=list)  # list[str] — fetch errors surfaced to user

@@ -77,6 +77,8 @@ def fetch_biometrics(
         ("tags", provider.fetch_tags, "tags"),
         ("heartrate", provider.fetch_heartrate, "heartrate"),
         ("workouts", provider.fetch_workouts, "workouts"),
+        ("body_composition", provider.fetch_body_composition, "body_composition"),
+        ("respiration", provider.fetch_respiration, "respiration"),
     ]:
         cached = None
         if use_cache:

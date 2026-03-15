@@ -68,6 +68,14 @@ class BaseProvider(ABC):
         """Fetch workout/exercise sessions. Returns list[WorkoutRecord]."""
         return []
 
+    def fetch_body_composition(self, start_date: str, end_date: str) -> list:
+        """Fetch body composition records. Returns list[BodyCompositionRecord]."""
+        return []
+
+    def fetch_respiration(self, start_date: str, end_date: str) -> list:
+        """Fetch respiration records. Returns list[RespirationRecord]."""
+        return []
+
     def fetch_sleep_time(self, start_date: str, end_date: str) -> Optional[str]:
         """Fetch optimal bedtime recommendation. Returns time string or None."""
         return None

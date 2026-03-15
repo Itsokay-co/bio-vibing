@@ -116,16 +116,19 @@ class FitbitProvider(BaseProvider):
         current = start
         while current <= end:
             day_str = current.strftime("%Y-%m-%d")
-            data = self._request(f"/1/user/-/activities/date/{day_str}.json")
-            summary = data.get("summary", {})
-            records.append(ActivityRecord(
-                day=day_str,
-                provider=self.name,
-                score=None,  # No composite score
-                steps=summary.get("steps"),
-                total_calories=summary.get("caloriesOut"),
-                met_average=None,
-            ))
+            try:
+                data = self._request(f"/1/user/-/activities/date/{day_str}.json")
+                summary = data.get("summary", {})
+                records.append(ActivityRecord(
+                    day=day_str,
+                    provider=self.name,
+                    score=None,
+                    steps=summary.get("steps"),
+                    total_calories=summary.get("caloriesOut"),
+                    met_average=None,
+                ))
+            except Exception:
+                pass  # Skip failed days, continue fetching the rest
             current += timedelta(days=1)
         return records
 
