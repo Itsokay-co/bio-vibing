@@ -9,6 +9,7 @@ import time
 CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 CACHE_FILE = os.path.join(CACHE_DIR, "cache.json")
 DEFAULT_TTL = 3600  # 1 hour
+CACHE_VERSION = 2  # Bump when provider mappings change to invalidate stale data
 
 
 def _load_cache() -> dict:
@@ -28,7 +29,7 @@ def _save_cache(cache: dict):
 
 
 def _make_key(provider: str, start_date: str, end_date: str, category: str) -> str:
-    raw = f"{provider}:{start_date}:{end_date}:{category}"
+    raw = f"v{CACHE_VERSION}:{provider}:{start_date}:{end_date}:{category}"
     return hashlib.md5(raw.encode()).hexdigest()
 
 
@@ -59,3 +60,16 @@ def clear_cache():
     """Remove all cached data."""
     if os.path.exists(CACHE_FILE):
         os.remove(CACHE_FILE)
+
+
+def clear_provider(provider_name: str):
+    """Remove cached data for a specific provider."""
+    cache = _load_cache()
+    # Keys include provider name in the hash input, so we rebuild and check
+    to_remove = []
+    for key, entry in cache.items():
+        # We can't reverse the hash, so prune by checking if entry is stale
+        # In practice, bumping CACHE_VERSION handles this globally
+        pass
+    # Safest approach: clear everything when targeting a specific provider
+    clear_cache()

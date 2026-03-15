@@ -2485,8 +2485,263 @@ if __name__ == "__main__":
 
 
 # ---------------------------------------------------------------------------
+# HR Zone Classification
+# ---------------------------------------------------------------------------
+
+def compute_hr_zones(heartrate: list, user_profile: dict) -> dict:
+    """Classify heart rate samples into zones and count minutes per zone.
+
+    Zones based on % of max HR:
+        Z1 50-60%, Z2 60-70%, Z3 70-80%, Z4 80-90%, Z5 90-100%
+
+    Args:
+        heartrate: list of HR record dicts with 'bpm' and 'timestamp'
+        user_profile: dict with optional 'max_hr_bpm' and 'age'
+
+    Returns:
+        Dict with zone_minutes, daily breakdown, total_classified_minutes
+    """
+    if not heartrate:
+        return {'zone_minutes': None, 'max_hr_used': None, 'total_minutes': 0}
+
+    max_hr = (user_profile.get('max_hr_bpm')
+              or (220 - user_profile['age'] if user_profile.get('age') else None)
+              or 190)
+
+    thresholds = [
+        ('z1_recovery', 0.50, 0.60),
+        ('z2_easy', 0.60, 0.70),
+        ('z3_moderate', 0.70, 0.80),
+        ('z4_hard', 0.80, 0.90),
+        ('z5_max', 0.90, 1.00),
+    ]
+
+    zone_minutes = {name: 0 for name, _, _ in thresholds}
+    zone_minutes['below_z1'] = 0
+    daily = {}
+
+    for hr in heartrate:
+        bpm = hr.get('bpm')
+        if not bpm or bpm <= 0:
+            continue
+
+        pct = bpm / max_hr
+        zone = 'below_z1'
+        for name, lo, hi in thresholds:
+            if lo <= pct < hi:
+                zone = name
+                break
+            if pct >= 1.0:
+                zone = 'z5_max'
+
+        # Each 5-min HR sample ≈ 5 minutes
+        zone_minutes[zone] += 5
+
+        day = hr.get('timestamp', '')[:10]
+        if day:
+            if day not in daily:
+                daily[day] = {name: 0 for name, _, _ in thresholds}
+                daily[day]['below_z1'] = 0
+            daily[day][zone] += 5
+
+    total = sum(zone_minutes.values())
+    return {
+        'zone_minutes': zone_minutes,
+        'daily': daily,
+        'max_hr_used': max_hr,
+        'total_minutes': total,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Intensity Minutes (WHO guidelines: 150 moderate or 75 vigorous per week)
+# ---------------------------------------------------------------------------
+
+def compute_intensity_minutes(heartrate: list, user_profile: dict) -> dict:
+    """Count moderate and vigorous intensity minutes from HR data.
+
+    Moderate: 64-76% max HR. Vigorous: 77-100% max HR.
+
+    Returns:
+        Dict with weekly totals and daily breakdown.
+    """
+    if not heartrate:
+        return {'moderate_minutes': 0, 'vigorous_minutes': 0, 'daily': {}}
+
+    max_hr = (user_profile.get('max_hr_bpm')
+              or (220 - user_profile['age'] if user_profile.get('age') else None)
+              or 190)
+
+    moderate = 0
+    vigorous = 0
+    daily = {}
+
+    for hr in heartrate:
+        bpm = hr.get('bpm')
+        if not bpm or bpm <= 0:
+            continue
+
+        pct = bpm / max_hr
+        day = hr.get('timestamp', '')[:10]
+        if day not in daily:
+            daily[day] = {'moderate': 0, 'vigorous': 0}
+
+        if 0.64 <= pct < 0.77:
+            moderate += 5
+            daily[day]['moderate'] += 5
+        elif pct >= 0.77:
+            vigorous += 5
+            daily[day]['vigorous'] += 5
+
+    return {
+        'moderate_minutes': moderate,
+        'vigorous_minutes': vigorous,
+        'combined_minutes': moderate + vigorous * 2,  # vigorous counts double per WHO
+        'daily': daily,
+        'max_hr_used': max_hr,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Recovery Index — provider-agnostic composite score
+# ---------------------------------------------------------------------------
+
+def compute_recovery_index(sleep: list, readiness: list) -> dict:
+    """Compute a provider-agnostic recovery index (0-100).
+
+    Uses z-scores of HRV (higher=better), RHR (lower=better),
+    sleep efficiency, and deep sleep percentage. Useful for providers
+    that don't have a built-in readiness/recovery score.
+
+    Returns:
+        Dict with daily scores and rolling average.
+    """
+    if not sleep or len(sleep) < 7:
+        return {'score': None, 'daily': {}, 'interpretation': 'insufficient data'}
+
+    # Collect per-day metrics
+    days_data = {}
+    for s in sleep:
+        day = s.get('day', '')
+        if not day:
+            continue
+        total = s.get('total_sleep_seconds')
+        deep = s.get('deep_sleep_seconds')
+        awake = s.get('awake_seconds', 0) or 0
+        hrv = s.get('avg_hrv_ms')
+        rhr = s.get('avg_resting_hr_bpm')
+        eff = s.get('efficiency')
+
+        if eff is None and total and total > 0:
+            eff = max(0, (total - awake) / total * 100)
+
+        deep_pct = (deep / total * 100) if deep and total and total > 0 else None
+
+        days_data[day] = {
+            'hrv': hrv, 'rhr': rhr, 'efficiency': eff, 'deep_pct': deep_pct
+        }
+
+    if len(days_data) < 7:
+        return {'score': None, 'daily': {}, 'interpretation': 'insufficient data'}
+
+    # Compute baselines (mean and stdev for z-scores)
+    def _stats(vals):
+        vals = [v for v in vals if v is not None]
+        if len(vals) < 3:
+            return None, None
+        m = mean(vals)
+        s = stdev(vals) if len(vals) > 1 else 1
+        return m, max(s, 0.01)
+
+    hrv_m, hrv_s = _stats([d['hrv'] for d in days_data.values()])
+    rhr_m, rhr_s = _stats([d['rhr'] for d in days_data.values()])
+    eff_m, eff_s = _stats([d['efficiency'] for d in days_data.values()])
+    dp_m, dp_s = _stats([d['deep_pct'] for d in days_data.values()])
+
+    daily_scores = {}
+    for day, d in sorted(days_data.items()):
+        z_scores = []
+        if hrv_m is not None and d['hrv'] is not None:
+            z_scores.append((d['hrv'] - hrv_m) / hrv_s)
+        if rhr_m is not None and d['rhr'] is not None:
+            z_scores.append(-(d['rhr'] - rhr_m) / rhr_s)  # lower RHR = better
+        if eff_m is not None and d['efficiency'] is not None:
+            z_scores.append((d['efficiency'] - eff_m) / eff_s)
+        if dp_m is not None and d['deep_pct'] is not None:
+            z_scores.append((d['deep_pct'] - dp_m) / dp_s)
+
+        if z_scores:
+            avg_z = mean(z_scores)
+            # Map z-score to 0-100 scale (z=0 → 50, z=+2 → ~85, z=-2 → ~15)
+            score = max(0, min(100, 50 + avg_z * 17.5))
+            daily_scores[day] = round(score, 1)
+
+    if not daily_scores:
+        return {'score': None, 'daily': {}, 'interpretation': 'insufficient data'}
+
+    recent = list(daily_scores.values())[-7:]
+    current = round(mean(recent), 1)
+
+    if current >= 70:
+        interp = 'well recovered'
+    elif current >= 50:
+        interp = 'moderate recovery'
+    elif current >= 30:
+        interp = 'under-recovered'
+    else:
+        interp = 'significantly under-recovered'
+
+    return {
+        'score': current,
+        'daily': daily_scores,
+        'interpretation': interp,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Computed Sleep Efficiency — provider-agnostic
+# ---------------------------------------------------------------------------
+
+def compute_sleep_efficiency(sleep: list) -> dict:
+    """Compute sleep efficiency from raw stage data, not relying on provider score.
+
+    efficiency = (total_sleep - awake) / total_sleep * 100
+
+    Returns:
+        Dict with nightly efficiencies and average.
+    """
+    nightly = {}
+    for s in sleep:
+        day = s.get('day', '')
+        total = s.get('total_sleep_seconds')
+        awake = s.get('awake_seconds', 0) or 0
+        if not day or not total or total <= 0:
+            continue
+        eff = max(0, (total - awake) / total * 100)
+        nightly[day] = round(eff, 1)
+
+    if not nightly:
+        return {'avg_efficiency': None, 'nightly': {}}
+
+    avg = round(mean(list(nightly.values())), 1)
+    return {
+        'avg_efficiency': avg,
+        'nightly': nightly,
+        'n_nights': len(nightly),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Orchestrator — single entry point for all metrics
 # ---------------------------------------------------------------------------
+
+def _safe_compute(name: str, func, *args) -> tuple:
+    """Run a metric function safely, catching errors."""
+    try:
+        return name, func(*args)
+    except Exception as e:
+        return name, {"error": str(e)}
+
 
 def compute_all(data: dict) -> dict:
     """Run all metrics on a BiometricData dict. Single entry point.
@@ -2496,6 +2751,8 @@ def compute_all(data: dict) -> dict:
 
     Returns:
         Dict keyed by metric name, each value is the metric's result dict.
+        Failed metrics return ``{"error": "..."}`` instead of crashing.
+        ``_errors`` key lists all failures.
     """
     sleep = data.get('sleep', [])
     readiness = data.get('readiness', [])
@@ -2505,54 +2762,77 @@ def compute_all(data: dict) -> dict:
     workouts = data.get('workouts', [])
     tags = data.get('tags', [])
     meals = data.get('meals', [])
+    user = data.get('user') or {}
 
     from cycle import detect_cycle_phases
-    cycle = detect_cycle_phases(tags, sleep, readiness)
+    try:
+        cycle = detect_cycle_phases(readiness, sleep, period_tags=tags or None)
+    except Exception as e:
+        cycle = {"current_phase": "unknown", "error": str(e)}
 
-    results = {
+    metrics = [
         # Autonomic & Circadian
-        'hrv_cv': compute_hrv_cv(sleep),
-        'coupling': compute_cross_modal_coupling(sleep, readiness, spo2),
-        'circadian': compute_circadian_fingerprint(heartrate),
-        'hrr': compute_heart_rate_recovery(workouts, heartrate),
+        ('hrv_cv', compute_hrv_cv, sleep),
+        ('coupling', compute_cross_modal_coupling, sleep, readiness, spo2),
+        ('circadian', compute_circadian_fingerprint, heartrate),
+        ('hrr', compute_heart_rate_recovery, workouts, heartrate),
 
         # Sleep Architecture
-        'sleep_regularity': compute_sleep_regularity(sleep),
-        'transitions': compute_sleep_transitions(sleep),
-        'deep_distribution': compute_deep_sleep_distribution(sleep),
-        'chronotype': compute_chronotype(sleep),
-        'nocturnal': compute_nocturnal_hr_shape(heartrate, sleep),
+        ('sleep_regularity', compute_sleep_regularity, sleep),
+        ('transitions', compute_sleep_transitions, sleep),
+        ('deep_distribution', compute_deep_sleep_distribution, sleep),
+        ('chronotype', compute_chronotype, sleep),
+        ('nocturnal', compute_nocturnal_hr_shape, heartrate, sleep),
 
         # Behavioral Patterns
-        'alcohol': compute_alcohol_detection(sleep),
-        'allostatic': compute_allostatic_load(sleep, readiness, spo2, stress),
-        'early_warning': compute_early_warning_signals(sleep),
-        'entropy': compute_daily_entropy(sleep, readiness),
-        'temp_amplitude': compute_temp_amplitude_trend(readiness),
+        ('alcohol', compute_alcohol_detection, sleep),
+        ('allostatic', compute_allostatic_load, sleep, readiness, spo2, stress),
+        ('early_warning', compute_early_warning_signals, sleep),
+        ('entropy', compute_daily_entropy, sleep, readiness),
+        ('temp_amplitude', compute_temp_amplitude_trend, readiness),
 
         # Training
-        'training': compute_training_load(workouts, heartrate, sleep),
+        ('training', compute_training_load, workouts, heartrate, sleep),
 
         # Change Detection
-        'cusum_hrv': detect_change_points(sleep, 'avg_hrv_ms'),
-        'cusum_rhr': detect_change_points(sleep, 'avg_resting_hr_bpm'),
+        ('cusum_hrv', detect_change_points, sleep, 'avg_hrv_ms'),
+        ('cusum_rhr', detect_change_points, sleep, 'avg_resting_hr_bpm'),
 
         # Tags & Cycle
-        'tag_effects': compute_tag_effects(tags, sleep),
-        'cycle': cycle,
-        'phase_performance': compute_phase_performance(sleep, workouts, cycle),
-    }
+        ('tag_effects', compute_tag_effects, tags, sleep),
+        ('phase_performance', compute_phase_performance, sleep, workouts, cycle),
+
+        # New metrics (batch 2)
+        ('hr_zones', compute_hr_zones, heartrate, user),
+        ('intensity_minutes', compute_intensity_minutes, heartrate, user),
+        ('recovery_index', compute_recovery_index, sleep, readiness),
+        ('sleep_efficiency', compute_sleep_efficiency, sleep),
+    ]
+
+    results = {'cycle': cycle, '_errors': []}
+    for entry in metrics:
+        name, func, *args = entry
+        key, value = _safe_compute(name, func, *args)
+        results[key] = value
+        if isinstance(value, dict) and 'error' in value:
+            results['_errors'].append(f"{key}: {value['error']}")
 
     # Nutrition crossover (only if meals exist)
     if meals:
         cycle_or_none = cycle if cycle.get('current_phase') != 'unknown' else None
-        results.update({
-            'meal_sleep': compute_meal_sleep_effects(meals, sleep),
-            'meal_circadian': compute_meal_circadian_alignment(meals, sleep),
-            'thermic': compute_thermic_effect(meals, readiness),
-            'macro_hrv': compute_macro_hrv_coupling(meals, sleep, cycle_or_none),
-            'nutrition_periodization': compute_nutrition_periodization(
-                meals, workouts, sleep, cycle_or_none),
-        })
+        nutrition_metrics = [
+            ('meal_sleep', compute_meal_sleep_effects, meals, sleep),
+            ('meal_circadian', compute_meal_circadian_alignment, meals, sleep),
+            ('thermic', compute_thermic_effect, meals, readiness),
+            ('macro_hrv', compute_macro_hrv_coupling, meals, sleep, cycle_or_none),
+            ('nutrition_periodization', compute_nutrition_periodization,
+             meals, workouts, sleep, cycle_or_none),
+        ]
+        for entry in nutrition_metrics:
+            name, func, *args = entry
+            key, value = _safe_compute(name, func, *args)
+            results[key] = value
+            if isinstance(value, dict) and 'error' in value:
+                results['_errors'].append(f"{key}: {value['error']}")
 
     return results
