@@ -25,7 +25,9 @@ from cycle import detect_cycle_phases
 from metrics import (compute_hrv_cv, compute_sleep_regularity,
                      compute_allostatic_load,
                      compute_training_load, compute_chronotype,
-                     compute_alcohol_detection, compute_early_warning_signals)
+                     compute_alcohol_detection, compute_early_warning_signals,
+                     compute_hr_zones, compute_intensity_minutes,
+                     compute_recovery_index)
 from dataclasses import asdict
 from datetime import datetime, timedelta
 from statistics import mean, stdev
@@ -300,6 +302,27 @@ if this_week_workouts:
         rest_avg = safe_mean([s['score'] for s in rest_sleep])
         diff = wo_avg - rest_avg
         print(f"    Sleep on workout days: {wo_avg:.0f} vs rest days: {rest_avg:.0f} ({diff:+.0f})")
+
+# --- HR zones & intensity ---
+heartrate = d.get('heartrate', [])
+user = d.get('user') or {}
+if heartrate:
+    this_week_hr = [h for h in heartrate if h.get('timestamp', '')[:10] >= this_week_start]
+    if this_week_hr:
+        hz = compute_hr_zones(this_week_hr, user)
+        im = compute_intensity_minutes(this_week_hr, user)
+        if hz['zone_minutes']:
+            active_zones = {k: v for k, v in hz['zone_minutes'].items() if v > 0 and k != 'below_z1'}
+            if active_zones:
+                zone_str = ', '.join(f"{k}={v}min" for k, v in active_zones.items())
+                print(f"\n  HR ZONES: {zone_str}")
+        if im['moderate_minutes'] or im['vigorous_minutes']:
+            print(f"  INTENSITY: {im['moderate_minutes']}min moderate, {im['vigorous_minutes']}min vigorous ({im['combined_minutes']}min combined)")
+
+# --- Recovery index ---
+ri = compute_recovery_index(sleep, readiness)
+if ri['score'] is not None:
+    print(f"\n  RECOVERY INDEX: {ri['score']}/100 ({ri['interpretation']})")
 
 # --- Best/worst night ---
 scored = [s for s in this_week_sleep if s.get('score')]

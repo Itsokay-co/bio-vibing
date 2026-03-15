@@ -34,7 +34,9 @@ from metrics import (compute_hrv_cv, compute_cross_modal_coupling,
                      compute_tag_effects, compute_phase_performance,
                      compute_meal_sleep_effects, compute_meal_circadian_alignment,
                      compute_thermic_effect, compute_macro_hrv_coupling,
-                     compute_nutrition_periodization)
+                     compute_nutrition_periodization,
+                     compute_hr_zones, compute_intensity_minutes,
+                     compute_recovery_index, compute_sleep_efficiency)
 from dataclasses import asdict
 from datetime import datetime, timedelta
 from statistics import mean, stdev
@@ -405,6 +407,44 @@ if cycle['current_phase'] != 'unknown':
             print(f"  {phase}: {', '.join(parts)} (n={data['n_nights']})")
         if pp['recommendation']:
             print(f"  {pp['recommendation']}")
+
+# --- HR ZONES ---
+print(f"\n--- HR ZONES ---")
+user = d.get('user') or {}
+hz = compute_hr_zones(heartrate, user)
+if hz['zone_minutes']:
+    print(f"  Max HR used: {hz['max_hr_used']} bpm")
+    for zone, mins in hz['zone_minutes'].items():
+        if mins > 0:
+            print(f"  {zone}: {mins} min")
+else:
+    print(f"  No heart rate data for zone analysis")
+
+# --- INTENSITY MINUTES ---
+print(f"\n--- INTENSITY MINUTES ---")
+im = compute_intensity_minutes(heartrate, user)
+if im['moderate_minutes'] or im['vigorous_minutes']:
+    print(f"  Moderate: {im['moderate_minutes']} min")
+    print(f"  Vigorous: {im['vigorous_minutes']} min")
+    print(f"  Combined (vigorous counts 2x): {im['combined_minutes']} min")
+else:
+    print(f"  No intensity data available")
+
+# --- RECOVERY INDEX ---
+print(f"\n--- RECOVERY INDEX ---")
+ri = compute_recovery_index(sleep, readiness)
+if ri['score'] is not None:
+    print(f"  Score: {ri['score']}/100 ({ri['interpretation']})")
+else:
+    print(f"  {ri.get('interpretation', 'Insufficient data')}")
+
+# --- COMPUTED SLEEP EFFICIENCY ---
+print(f"\n--- SLEEP EFFICIENCY (computed) ---")
+se = compute_sleep_efficiency(sleep)
+if se['avg_efficiency'] is not None:
+    print(f"  Average: {se['avg_efficiency']}% across {se['n_nights']} nights")
+else:
+    print(f"  Insufficient data")
 
 # --- Optimal bedtime ---
 if d.get('optimal_bedtime'):

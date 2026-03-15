@@ -151,6 +151,21 @@ if cycle['current_phase'] != 'unknown':
             if 14 <= gap <= cycle.get('cycle_length', 28):
                 print(f"    Note: {ed} falls in estimated luteal phase — biometric shifts may overlap")
 
+# --- HR ZONES COMPARISON ---
+heartrate = d.get('heartrate', [])
+if heartrate:
+    from metrics import compute_hr_zones, compute_intensity_minutes
+    user = d.get('user') or {}
+    pre_hr = [h for h in heartrate if h.get('timestamp', '')[:10] < event_dates[0]]
+    post_hr = [h for h in heartrate if h.get('timestamp', '')[:10] >= event_dates[0]]
+    if pre_hr and post_hr:
+        pre_im = compute_intensity_minutes(pre_hr, user)
+        post_im = compute_intensity_minutes(post_hr, user)
+        if pre_im['combined_minutes'] or post_im['combined_minutes']:
+            print(f"\n  Intensity minutes (combined):")
+            print(f"    Pre:  {pre_im['combined_minutes']} min")
+            print(f"    Post: {post_im['combined_minutes']} min")
+
 print()
 PYEOF
 ```

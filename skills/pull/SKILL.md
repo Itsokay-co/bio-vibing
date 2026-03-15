@@ -115,6 +115,26 @@ if stress:
     if stress_high: print(f'  High stress minutes: {mean(stress_high):.0f} avg/day')
     if recovery: print(f'  Recovery minutes: {mean(recovery):.0f} avg/day')
 
+# --- BODY COMPOSITION ---
+body_comp = data.get('body_composition', [])
+if body_comp:
+    latest = body_comp[-1]
+    parts = []
+    if latest.get('weight_kg'): parts.append(f"{latest['weight_kg']:.1f}kg")
+    if latest.get('body_fat_pct'): parts.append(f"{latest['body_fat_pct']:.1f}% body fat")
+    if latest.get('bmi'): parts.append(f"BMI {latest['bmi']:.1f}")
+    if parts:
+        print(f'\nBODY COMPOSITION')
+        print(f'  Latest: {", ".join(parts)}')
+
+# --- RESPIRATION ---
+respiration = data.get('respiration', [])
+if respiration:
+    resp_vals = [r['avg_respiratory_rate'] for r in respiration if r.get('avg_respiratory_rate')]
+    if resp_vals:
+        print(f'\nRESPIRATION ({len(respiration)} days)')
+        print(f'  Avg respiratory rate: {mean(resp_vals):.1f} brpm')
+
 PYEOF
 ```
 
