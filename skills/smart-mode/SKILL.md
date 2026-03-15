@@ -36,7 +36,8 @@ from metrics import (compute_hrv_cv, compute_cross_modal_coupling,
                      compute_thermic_effect, compute_macro_hrv_coupling,
                      compute_nutrition_periodization,
                      compute_hr_zones, compute_intensity_minutes,
-                     compute_recovery_index, compute_sleep_efficiency)
+                     compute_recovery_index, compute_sleep_efficiency,
+                     compute_workout_pace, compute_respiratory_trends)
 from dataclasses import asdict
 from datetime import datetime, timedelta
 from statistics import mean, stdev
@@ -445,6 +446,25 @@ if se['avg_efficiency'] is not None:
     print(f"  Average: {se['avg_efficiency']}% across {se['n_nights']} nights")
 else:
     print(f"  Insufficient data")
+
+# --- WORKOUT PACE ---
+if workouts:
+    wp = compute_workout_pace(workouts)
+    if wp['n_paced']:
+        print(f"\n--- WORKOUT PACE ---")
+        for act, info in wp['by_type'].items():
+            print(f"  {act}: {info['avg_pace_min_per_km']}/km avg ({info['n_workouts']} workouts)")
+
+# --- RESPIRATORY TRENDS ---
+respiration = d.get('respiration', [])
+if respiration:
+    rt = compute_respiratory_trends(respiration)
+    if rt['avg_rate'] is not None:
+        print(f"\n--- RESPIRATORY RATE ---")
+        print(f"  Average: {rt['avg_rate']} brpm (SD {rt['sd']})")
+        print(f"  Trend: {rt['trend']} ({rt['n_nights']} nights)")
+        if rt['elevated_nights']:
+            print(f"  Elevated nights: {', '.join(rt['elevated_nights'][-5:])}")
 
 # --- Optimal bedtime ---
 if d.get('optimal_bedtime'):

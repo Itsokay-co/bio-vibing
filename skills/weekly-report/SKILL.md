@@ -27,7 +27,7 @@ from metrics import (compute_hrv_cv, compute_sleep_regularity,
                      compute_training_load, compute_chronotype,
                      compute_alcohol_detection, compute_early_warning_signals,
                      compute_hr_zones, compute_intensity_minutes,
-                     compute_recovery_index)
+                     compute_recovery_index, compute_respiratory_trends)
 from dataclasses import asdict
 from datetime import datetime, timedelta
 from statistics import mean, stdev
@@ -323,6 +323,13 @@ if heartrate:
 ri = compute_recovery_index(sleep, readiness)
 if ri['score'] is not None:
     print(f"\n  RECOVERY INDEX: {ri['score']}/100 ({ri['interpretation']})")
+
+# --- Respiratory rate ---
+respiration = d.get('respiration', [])
+if respiration:
+    rt = compute_respiratory_trends(respiration)
+    if rt['avg_rate'] is not None:
+        print(f"\n  RESPIRATORY RATE: {rt['avg_rate']} brpm avg, trend: {rt['trend']}")
 
 # --- Best/worst night ---
 scored = [s for s in this_week_sleep if s.get('score')]

@@ -241,9 +241,9 @@ def compute_hrv_cv(sleep: list, windows: Optional[list] = None) -> dict:
     cv = current_7
     if cv is None:
         interpretation = "insufficient_data"
-    elif cv < 8:
+    elif cv < _cfg("hrv_cv_low"):
         interpretation = "rigid"
-    elif cv <= 25:
+    elif cv <= _cfg("hrv_cv_high"):
         interpretation = "healthy"
     else:
         interpretation = "chaotic"
@@ -2581,7 +2581,7 @@ def compute_hr_zones(heartrate: list, user_profile: dict) -> dict:
 
     max_hr = (user_profile.get('max_hr_bpm')
               or (220 - user_profile['age'] if user_profile.get('age') else None)
-              or 190)
+              or _cfg('default_max_hr'))
 
     thresholds = [
         ('z1_recovery', 0.50, 0.60),
@@ -2645,7 +2645,7 @@ def compute_intensity_minutes(heartrate: list, user_profile: dict) -> dict:
 
     max_hr = (user_profile.get('max_hr_bpm')
               or (220 - user_profile['age'] if user_profile.get('age') else None)
-              or 190)
+              or _cfg('default_max_hr'))
 
     moderate = 0
     vigorous = 0
@@ -2661,10 +2661,10 @@ def compute_intensity_minutes(heartrate: list, user_profile: dict) -> dict:
         if day not in daily:
             daily[day] = {'moderate': 0, 'vigorous': 0}
 
-        if 0.64 <= pct < 0.77:
+        if _cfg('intensity_moderate_lo') <= pct < _cfg('intensity_moderate_hi'):
             moderate += 5
             daily[day]['moderate'] += 5
-        elif pct >= 0.77:
+        elif pct >= _cfg('intensity_vigorous_lo'):
             vigorous += 5
             daily[day]['vigorous'] += 5
 
@@ -2757,11 +2757,11 @@ def compute_recovery_index(sleep: list, readiness: list) -> dict:
     recent = list(daily_scores.values())[-7:]
     current = round(mean(recent), 1)
 
-    if current >= 70:
+    if current >= _cfg('recovery_well'):
         interp = 'well recovered'
-    elif current >= 50:
+    elif current >= _cfg('recovery_moderate'):
         interp = 'moderate recovery'
-    elif current >= 30:
+    elif current >= _cfg('recovery_under'):
         interp = 'under-recovered'
     else:
         interp = 'significantly under-recovered'
