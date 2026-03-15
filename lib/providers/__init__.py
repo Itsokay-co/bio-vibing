@@ -11,10 +11,12 @@ PROVIDERS = {
     "whoop": {"env": "WHOOP_ACCESS_TOKEN", "module": "providers.whoop", "class": "WhoopProvider"},
     "fitbit": {"env": "FITBIT_ACCESS_TOKEN", "module": "providers.fitbit", "class": "FitbitProvider"},
     "apple_health": {"env": "APPLE_HEALTH_EXPORT", "module": "providers.apple_health", "class": "AppleHealthProvider"},
+    "garmin": {"env": "GARMIN_EXPORT_DIR", "module": "providers.garmin", "class": "GarminProvider"},
+    "open_wearables": {"env": "OPEN_WEARABLES_API_KEY", "module": "providers.open_wearables", "class": "OpenWearablesProvider"},
 }
 
 # Detection priority order
-DETECTION_ORDER = ["oura", "whoop", "fitbit", "apple_health"]
+DETECTION_ORDER = ["oura", "whoop", "fitbit", "garmin", "apple_health"]
 
 
 def detect_provider() -> Optional[str]:

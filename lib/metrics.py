@@ -165,18 +165,53 @@ def _cosinor_fit(hours: list, values: list) -> Optional[dict]:
 
 
 def _parse_iso_dt(ts: str) -> Optional[datetime]:
-    """Parse ISO 8601 timestamp, handling common formats."""
+    """Parse ISO 8601 timestamp, handling common formats.
+
+    Tries timezone-aware formats first. If the timestamp has no timezone,
+    it is returned as-is (naive). Callers that need local time should
+    use _to_local_hour() which applies USER_TIMEZONE offset.
+    """
+    if not ts:
+        return None
+    # Handle Z suffix
+    cleaned = ts.replace("Z", "+00:00") if "Z" in ts else ts
     for fmt in (
         "%Y-%m-%dT%H:%M:%S.%f%z",
         "%Y-%m-%dT%H:%M:%S%z",
         "%Y-%m-%dT%H:%M:%S.%f",
         "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M:%S",
     ):
         try:
-            return datetime.strptime(ts, fmt)
+            return datetime.strptime(cleaned, fmt)
         except (ValueError, TypeError):
             continue
     return None
+
+
+# User timezone offset in hours (e.g. -7 for US Pacific, +2 for CEST)
+_USER_TZ_OFFSET = None
+_tz_str = os.environ.get("USER_TIMEZONE", "")
+if _tz_str:
+    try:
+        _USER_TZ_OFFSET = float(_tz_str)
+    except ValueError:
+        pass
+
+
+def _to_local_hour(dt: datetime) -> float:
+    """Convert datetime to local fractional hour (0-24).
+
+    If dt is timezone-aware and USER_TIMEZONE is set, converts to local.
+    Otherwise returns dt.hour as-is (assumes local time).
+    """
+    hour = dt.hour + dt.minute / 60.0
+    if _USER_TZ_OFFSET is not None and dt.tzinfo is not None:
+        # dt is UTC-aware, shift to local
+        utc_offset_hours = dt.utcoffset().total_seconds() / 3600
+        hour = hour - utc_offset_hours + _USER_TZ_OFFSET
+        hour = hour % 24
+    return hour
 
 
 def _safe_stdev(vals):
@@ -413,7 +448,7 @@ def compute_circadian_fingerprint(heartrate: list) -> Optional[dict]:
         if dt is None:
             continue
 
-        fractional_hour = dt.hour + dt.minute / 60.0
+        fractional_hour = _to_local_hour(dt)
         bpm = hr['bpm']
 
         all_hours.append(fractional_hour)
@@ -965,7 +1000,7 @@ def compute_nocturnal_hr_shape(heartrate: list, sleep: list) -> dict:
     # Find nadir
     nadir_bpm = min(h[1] for h in night_hrs)
     nadir_entry = next(h for h in night_hrs if h[1] == nadir_bpm)
-    nadir_hour = nadir_entry[0].hour + nadir_entry[0].minute / 60
+    nadir_hour = _to_local_hour(nadir_entry[0])
 
     # Dipping ratio
     day_mean = mean(day_hrs)
@@ -1451,13 +1486,14 @@ def compute_chronotype(sleep: list) -> dict:
         try:
             start = _parse_iso_dt(s['bedtime_start'])
             dur_h = s['total_sleep_seconds'] / 3600
+            start_h = _to_local_hour(start)
             # Mid-sleep in hours from midnight
-            mid = start.hour + start.minute / 60 + dur_h / 2
+            mid = start_h + dur_h / 2
             if mid > 24:
                 mid -= 24
             # Handle pre-midnight starts
-            if start.hour >= 18:
-                mid = (start.hour - 24) + start.minute / 60 + dur_h / 2
+            if start_h >= 18:
+                mid = (start_h - 24) + dur_h / 2
 
             day_dt = datetime.strptime(s['day'], "%Y-%m-%d")
             is_free = day_dt.weekday() >= 5  # Sat=5, Sun=6
@@ -1910,7 +1946,7 @@ def compute_meal_circadian_alignment(meals: list, sleep: list) -> dict:
             gap_h = (b - m).total_seconds() / 3600
             if -2 < gap_h < 12:  # sanity: ignore nonsensical gaps
                 gaps.append(gap_h)
-                meal_hours.append(meal_dt.hour + meal_dt.minute / 60)
+                meal_hours.append(_to_local_hour(meal_dt))
 
     if not gaps:
         return {"avg_gap_hours": None, "regularity_score": None,
@@ -2922,6 +2958,53 @@ def compute_respiratory_trends(respiration: list) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Active / Sedentary Minutes (estimated from daily step totals)
+# ---------------------------------------------------------------------------
+
+def compute_active_minutes(activity: list) -> dict:
+    """Estimate active vs sedentary minutes from daily step counts.
+
+    Uses the heuristic: steps / 100 = approximate active minutes
+    (average cadence ~100 steps/min for walking). Remaining waking
+    hours (~16h) are sedentary.
+
+    This is an approximation. For precise values, step time-series
+    data (per-minute) would be needed.
+
+    Returns:
+        Dict with daily active/sedentary estimates and averages.
+    """
+    daily = {}
+    for a in activity:
+        steps = a.get('steps')
+        day = a.get('day', '')
+        if not steps or not day:
+            continue
+        # Approximate: 100 steps/min cadence
+        active_min = min(steps / 100, 960)  # cap at 16h
+        sedentary_min = max(0, 960 - active_min)  # 16 waking hours
+        daily[day] = {
+            'active_minutes': round(active_min),
+            'sedentary_minutes': round(sedentary_min),
+            'steps': steps,
+        }
+
+    if not daily:
+        return {'avg_active': None, 'avg_sedentary': None, 'daily': {}, 'method': 'estimated'}
+
+    actives = [d['active_minutes'] for d in daily.values()]
+    seds = [d['sedentary_minutes'] for d in daily.values()]
+
+    return {
+        'avg_active': round(mean(actives)),
+        'avg_sedentary': round(mean(seds)),
+        'daily': daily,
+        'n_days': len(daily),
+        'method': 'estimated_from_daily_steps',
+    }
+
+
+# ---------------------------------------------------------------------------
 # Orchestrator — single entry point for all metrics
 # ---------------------------------------------------------------------------
 
@@ -3001,6 +3084,7 @@ def compute_all(data: dict) -> dict:
         # New metrics (batch 3)
         ('workout_pace', compute_workout_pace, workouts),
         ('respiratory_trends', compute_respiratory_trends, data.get('respiration', [])),
+        ('active_minutes', compute_active_minutes, data.get('activity', [])),
     ]
 
     results = {'cycle': cycle, '_errors': []}
