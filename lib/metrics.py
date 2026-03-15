@@ -12,7 +12,73 @@ Usage:
 from datetime import datetime, timedelta
 from statistics import mean, stdev
 from typing import Optional
+import json
 import math
+import os
+
+
+# ---------------------------------------------------------------------------
+# Configurable thresholds — override via BIO_VIBING_THRESHOLDS env var (JSON)
+# ---------------------------------------------------------------------------
+
+METRIC_DEFAULTS = {
+    # HRV-CV interpretation
+    "hrv_cv_low": 8,           # below = rigid
+    "hrv_cv_high": 25,         # above = erratic
+    # Coupling
+    "coupling_r_threshold": 0.2,
+    # Circadian
+    "circadian_r2_strong": 0.3,
+    "circadian_r2_weak": 0.15,
+    # HRR fitness
+    "hrr5_good": 15,
+    "hrr5_moderate": 10,
+    "hrr5_poor": 5,
+    # Allostatic load
+    "allostatic_z_threshold": 1.0,
+    # ACWR training zones
+    "acwr_undertraining": 0.8,
+    "acwr_sweet_spot": 1.3,
+    "acwr_danger": 1.5,
+    # Nocturnal HR dipping
+    "dipping_threshold": 10,
+    # Sample entropy
+    "entropy_r_factor": 0.3,
+    "entropy_rigid": 0.5,
+    "entropy_chaotic": 2.0,
+    # Sleep regularity
+    "sri_regular": 85,
+    "sri_moderate": 70,
+    # Deep sleep distribution
+    "deep_front_loaded": 0.60,
+    "deep_disrupted": 0.50,
+    # Chronotype
+    "chrono_early": 2.5,
+    "chrono_late": 4.5,
+    # Recovery index
+    "recovery_well": 70,
+    "recovery_moderate": 50,
+    "recovery_under": 30,
+    # Max HR fallback
+    "default_max_hr": 190,
+    # Intensity zones (pct of max HR)
+    "intensity_moderate_lo": 0.64,
+    "intensity_moderate_hi": 0.76,
+    "intensity_vigorous_lo": 0.77,
+}
+
+# Load user overrides from env
+_user_overrides = os.environ.get("BIO_VIBING_THRESHOLDS", "")
+if _user_overrides:
+    try:
+        METRIC_DEFAULTS.update(json.loads(_user_overrides))
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+
+def _cfg(key):
+    """Get a configurable threshold value."""
+    return METRIC_DEFAULTS[key]
 
 
 # ---------------------------------------------------------------------------
@@ -2741,6 +2807,121 @@ def compute_sleep_efficiency(sleep: list) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Workout Pace Calculation
+# ---------------------------------------------------------------------------
+
+WORKOUTS_WITH_PACE = {
+    "running", "trail_running", "walking", "hiking",
+    "cycling", "indoor_cycling", "mountain_biking",
+    "swimming", "rowing", "cross_country_skiing",
+}
+
+
+def compute_workout_pace(workouts: list) -> dict:
+    """Compute pace for applicable workouts (running, cycling, swimming).
+
+    pace_sec_per_km = 1000 / avg_speed_mps (if speed available)
+    OR duration_seconds / (distance_m / 1000) (from distance + duration)
+
+    Returns:
+        Dict with per-workout paces and averages by activity type.
+    """
+    paces = []
+    by_type = {}
+
+    for w in workouts:
+        activity = w.get('activity', '')
+        if activity not in WORKOUTS_WITH_PACE:
+            continue
+
+        pace = None
+        speed = w.get('avg_speed_mps')
+        if speed and speed > 0:
+            pace = 1000 / speed
+        else:
+            dist = w.get('distance_m')
+            dur = w.get('duration_seconds')
+            if dist and dur and dist > 0:
+                pace = dur / (dist / 1000)
+
+        if pace and pace > 0:
+            entry = {
+                'day': w.get('day', ''),
+                'activity': activity,
+                'pace_sec_per_km': round(pace, 1),
+                'pace_min_per_km': f"{int(pace // 60)}:{int(pace % 60):02d}",
+            }
+            paces.append(entry)
+            by_type.setdefault(activity, []).append(pace)
+
+    avg_by_type = {}
+    for act, vals in by_type.items():
+        avg = mean(vals)
+        avg_by_type[act] = {
+            'avg_pace_sec_per_km': round(avg, 1),
+            'avg_pace_min_per_km': f"{int(avg // 60)}:{int(avg % 60):02d}",
+            'n_workouts': len(vals),
+        }
+
+    return {
+        'workouts': paces,
+        'by_type': avg_by_type,
+        'n_paced': len(paces),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Respiratory Rate Analysis
+# ---------------------------------------------------------------------------
+
+def compute_respiratory_trends(respiration: list) -> dict:
+    """Track respiratory rate trends and correlations.
+
+    Args:
+        respiration: list of respiration record dicts with avg_respiratory_rate
+
+    Returns:
+        Dict with nightly values, trend, and baseline stats.
+    """
+    vals = []
+    for r in respiration:
+        rate = r.get('avg_respiratory_rate')
+        if rate is not None and rate > 0:
+            vals.append({'day': r.get('day', ''), 'rate': rate})
+
+    if len(vals) < 3:
+        return {'avg_rate': None, 'trend': 'insufficient_data', 'n_nights': 0}
+
+    rates = [v['rate'] for v in vals]
+    avg = round(mean(rates), 1)
+    sd = round(stdev(rates), 2) if len(rates) > 1 else 0
+
+    # Trend: compare first half to second half
+    mid = len(rates) // 2
+    first_half = mean(rates[:mid])
+    second_half = mean(rates[mid:])
+    diff = second_half - first_half
+    if abs(diff) < 0.5:
+        trend = "stable"
+    elif diff > 0:
+        trend = "increasing"
+    else:
+        trend = "decreasing"
+
+    # Flag elevated nights (>1 SD above mean)
+    elevated = [v for v in vals if v['rate'] > avg + sd]
+
+    return {
+        'avg_rate': avg,
+        'sd': sd,
+        'trend': trend,
+        'n_nights': len(vals),
+        'nightly': {v['day']: v['rate'] for v in vals},
+        'elevated_nights': [v['day'] for v in elevated],
+    }
+
+
+# ---------------------------------------------------------------------------
 # Orchestrator — single entry point for all metrics
 # ---------------------------------------------------------------------------
 
@@ -2816,6 +2997,10 @@ def compute_all(data: dict) -> dict:
         ('intensity_minutes', compute_intensity_minutes, heartrate, user),
         ('recovery_index', compute_recovery_index, sleep, readiness),
         ('sleep_efficiency', compute_sleep_efficiency, sleep),
+
+        # New metrics (batch 3)
+        ('workout_pace', compute_workout_pace, workouts),
+        ('respiratory_trends', compute_respiratory_trends, data.get('respiration', [])),
     ]
 
     results = {'cycle': cycle, '_errors': []}

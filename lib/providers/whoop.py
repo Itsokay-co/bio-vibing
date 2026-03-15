@@ -12,37 +12,7 @@ from schema import (
     ActivityRecord, StressRecord, SpO2Record, WorkoutRecord,
 )
 from providers.base import BaseProvider
-
-
-# Whoop sport_name → normalized activity type
-WHOOP_WORKOUT_TYPES = {
-    "running": "running", "walking": "walking", "hiking/rucking": "hiking",
-    "track & field": "running", "stroller walking": "walking",
-    "cycling": "cycling", "mountain biking": "mountain_biking",
-    "spin": "indoor_cycling", "assault bike": "indoor_cycling",
-    "swimming": "swimming", "water polo": "water_polo",
-    "rowing": "rowing", "kayaking": "kayaking",
-    "paddleboarding": "stand_up_paddleboarding", "surfing": "surfing",
-    "weightlifting": "strength_training", "powerlifting": "strength_training",
-    "strength trainer": "strength_training", "functional fitness": "cardio_training",
-    "elliptical": "elliptical", "stairmaster": "stair_climbing",
-    "hiit": "cardio_training", "jumping rope": "cardio_training",
-    "yoga": "yoga", "hot yoga": "yoga", "pilates": "pilates",
-    "stretching": "stretching", "meditation": "meditation",
-    "skiing": "alpine_skiing", "cross country skiing": "cross_country_skiing",
-    "snowboarding": "snowboarding", "ice skating": "ice_skating",
-    "soccer": "soccer", "basketball": "basketball", "football": "american_football",
-    "baseball": "baseball", "volleyball": "volleyball", "rugby": "rugby",
-    "lacrosse": "lacrosse", "cricket": "cricket",
-    "ice hockey": "hockey", "field hockey": "hockey",
-    "tennis": "tennis", "squash": "squash", "badminton": "badminton",
-    "table tennis": "table_tennis", "pickleball": "pickleball",
-    "boxing": "boxing", "kickboxing": "boxing", "martial arts": "martial_arts",
-    "jiu jitsu": "martial_arts", "wrestling": "wrestling",
-    "rock climbing": "rock_climbing", "golf": "golf",
-    "dance": "dance", "gymnastics": "gymnastics",
-    "crossfit": "cardio_training", "obstacle course racing": "cardio_training",
-}
+from workout_types import normalize_workout_type
 
 
 class WhoopProvider(BaseProvider):
@@ -256,9 +226,7 @@ class WhoopProvider(BaseProvider):
             if d.get("score_state") == "PENDING_STRAIN":
                 continue
             sport = d.get("sport_name", d.get("sport_id", ""))
-            activity = WHOOP_WORKOUT_TYPES.get(
-                str(sport).lower(), str(sport).lower().replace(" ", "_")
-            )
+            activity = normalize_workout_type(str(sport), "whoop")
             start = d.get("start", "")
             end = d.get("end", "")
             duration = None

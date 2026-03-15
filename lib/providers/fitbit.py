@@ -13,6 +13,7 @@ from schema import (
     ActivityRecord, StressRecord, HeartRateRecord, WorkoutRecord,
 )
 from providers.base import BaseProvider
+from workout_types import normalize_workout_type
 
 
 class FitbitProvider(BaseProvider):
@@ -153,7 +154,7 @@ class FitbitProvider(BaseProvider):
                 records.append(WorkoutRecord(
                     day=day,
                     provider=self.name,
-                    activity=d.get("activityName", "").lower().replace(" ", "_"),
+                    activity=normalize_workout_type(d.get("activityName", ""), "fitbit"),
                     calories=d.get("calories"),
                     distance_m=d.get("distance", 0) * 1000 if d.get("distanceUnit") == "Kilometer" else d.get("distance"),
                     duration_seconds=duration_ms // 1000 if duration_ms else None,

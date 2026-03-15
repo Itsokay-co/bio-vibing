@@ -14,6 +14,7 @@ from schema import (
     WorkoutRecord,
 )
 from providers.base import BaseProvider
+from workout_types import normalize_workout_type
 
 
 class OuraProvider(BaseProvider):
@@ -235,7 +236,7 @@ class OuraProvider(BaseProvider):
             records.append(WorkoutRecord(
                 day=d.get("day", ""),
                 provider=self.name,
-                activity=d.get("activity"),
+                activity=normalize_workout_type(d.get("activity", ""), "oura"),
                 calories=d.get("calories"),
                 distance_m=d.get("distance"),
                 intensity=d.get("intensity"),

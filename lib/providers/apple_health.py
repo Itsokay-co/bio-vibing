@@ -19,6 +19,7 @@ from schema import (
     RespirationRecord,
 )
 from providers.base import BaseProvider
+from workout_types import normalize_workout_type
 
 
 # Apple Health type identifiers
@@ -296,8 +297,7 @@ class AppleHealthProvider(BaseProvider):
 
             # Map Apple workout type to normalized name
             workout_type = w.get("workoutActivityType", "")
-            # e.g. "HKWorkoutActivityTypeRunning" → "running"
-            activity = workout_type.replace("HKWorkoutActivityType", "").lower()
+            activity = normalize_workout_type(workout_type, "apple_health")
 
             calories = None
             cal_str = w.get("totalEnergyBurned")
