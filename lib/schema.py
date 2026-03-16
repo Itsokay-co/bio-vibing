@@ -50,6 +50,15 @@ class ActivityRecord:
     steps: Optional[int] = None
     total_calories: Optional[int] = None
     met_average: Optional[float] = None
+    distance_m: Optional[float] = None
+    floors_climbed: Optional[int] = None
+    elevation_m: Optional[float] = None
+    active_minutes: Optional[int] = None  # real provider-computed value
+    sedentary_minutes: Optional[int] = None
+    moderate_minutes: Optional[int] = None  # HR zone: 64-76% max HR
+    vigorous_minutes: Optional[int] = None  # HR zone: 77%+ max HR
+    avg_hr_bpm: Optional[float] = None
+    max_hr_bpm: Optional[float] = None
 
 
 @dataclass
@@ -119,6 +128,7 @@ class BodyCompositionRecord:
     weight_kg: Optional[float] = None
     body_fat_pct: Optional[float] = None
     lean_mass_kg: Optional[float] = None
+    muscle_mass_kg: Optional[float] = None
     bmi: Optional[float] = None
 
 

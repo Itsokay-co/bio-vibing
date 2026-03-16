@@ -9,7 +9,7 @@ import time
 CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 CACHE_FILE = os.path.join(CACHE_DIR, "cache.json")
 DEFAULT_TTL = 3600  # 1 hour
-CACHE_VERSION = 2  # Bump when provider mappings change to invalidate stale data
+CACHE_VERSION = 3  # Bump when provider mappings change to invalidate stale data
 
 
 def _load_cache() -> dict:

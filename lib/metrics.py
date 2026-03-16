@@ -2962,25 +2962,36 @@ def compute_respiratory_trends(respiration: list) -> dict:
 # ---------------------------------------------------------------------------
 
 def compute_active_minutes(activity: list) -> dict:
-    """Estimate active vs sedentary minutes from daily step counts.
+    """Active vs sedentary minutes from provider data or step heuristic.
 
-    Uses the heuristic: steps / 100 = approximate active minutes
-    (average cadence ~100 steps/min for walking). Remaining waking
-    hours (~16h) are sedentary.
-
-    This is an approximation. For precise values, step time-series
-    data (per-minute) would be needed.
+    Prefers real provider-reported active_minutes/sedentary_minutes when
+    available (e.g. from Open Wearables). Falls back to the steps/100
+    heuristic for providers that don't report these fields.
 
     Returns:
-        Dict with daily active/sedentary estimates and averages.
+        Dict with daily active/sedentary values and averages.
     """
     daily = {}
+    has_reported = False
     for a in activity:
-        steps = a.get('steps')
         day = a.get('day', '')
-        if not steps or not day:
+        if not day:
             continue
-        # Approximate: 100 steps/min cadence
+        # Prefer real provider-computed values
+        real_active = a.get('active_minutes')
+        real_sedentary = a.get('sedentary_minutes')
+        if real_active is not None:
+            has_reported = True
+            daily[day] = {
+                'active_minutes': real_active,
+                'sedentary_minutes': real_sedentary if real_sedentary is not None else max(0, 960 - real_active),
+                'steps': a.get('steps'),
+            }
+            continue
+        # Fallback: estimate from steps
+        steps = a.get('steps')
+        if not steps:
+            continue
         active_min = min(steps / 100, 960)  # cap at 16h
         sedentary_min = max(0, 960 - active_min)  # 16 waking hours
         daily[day] = {
@@ -3000,7 +3011,7 @@ def compute_active_minutes(activity: list) -> dict:
         'avg_sedentary': round(mean(seds)),
         'daily': daily,
         'n_days': len(daily),
-        'method': 'estimated_from_daily_steps',
+        'method': 'reported' if has_reported else 'estimated_from_daily_steps',
     }
 
 
