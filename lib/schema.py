@@ -167,6 +167,15 @@ class MealRecord:
 
 
 @dataclass
+class GlucoseRecord:
+    timestamp: str  # ISO 8601
+    provider: str  # "dexcom", "nightscout", "libre"
+    value_mgdl: Optional[float] = None
+    trend: Optional[str] = None  # "rising", "falling", "flat", "not_computable"
+    trend_rate: Optional[float] = None  # mg/dL per minute
+
+
+@dataclass
 class GutScore:
     """Daily gut health score from Suna API."""
     day: str
@@ -241,6 +250,7 @@ class BiometricData:
     body_composition: list = field(default_factory=list)  # list[BodyCompositionRecord]
     respiration: list = field(default_factory=list)  # list[RespirationRecord]
     meals: list = field(default_factory=list)  # list[MealRecord]
+    glucose: list = field(default_factory=list)  # list[GlucoseRecord]
     optimal_bedtime: Optional[str] = None
     # Suna API scores (consumed, not computed here)
     gut_scores: list = field(default_factory=list)  # list[GutScore]

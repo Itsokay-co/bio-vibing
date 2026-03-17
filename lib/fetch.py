@@ -93,6 +93,7 @@ def fetch_biometrics(
         ("workouts", provider.fetch_workouts, "workouts"),
         ("body_composition", provider.fetch_body_composition, "body_composition"),
         ("respiration", provider.fetch_respiration, "respiration"),
+        ("glucose", provider.fetch_glucose, "glucose"),
     ]:
         cached = None
         if use_cache:

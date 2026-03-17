@@ -76,6 +76,10 @@ class BaseProvider(ABC):
         """Fetch respiration records. Returns list[RespirationRecord]."""
         return []
 
+    def fetch_glucose(self, start_date: str, end_date: str) -> list:
+        """Fetch continuous glucose records. Returns list[GlucoseRecord]."""
+        return []
+
     def fetch_sleep_time(self, start_date: str, end_date: str) -> Optional[str]:
         """Fetch optimal bedtime recommendation. Returns time string or None."""
         return None

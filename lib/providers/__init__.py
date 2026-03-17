@@ -13,6 +13,8 @@ PROVIDERS = {
     "apple_health": {"env": "APPLE_HEALTH_EXPORT", "module": "providers.apple_health", "class": "AppleHealthProvider"},
     "garmin": {"env": "GARMIN_EXPORT_DIR", "module": "providers.garmin", "class": "GarminProvider"},
     "open_wearables": {"env": "OPEN_WEARABLES_API_KEY", "module": "providers.open_wearables", "class": "OpenWearablesProvider"},
+    "nightscout": {"env": "NIGHTSCOUT_URL", "module": "providers.nightscout", "class": "NightscoutProvider"},
+    "dexcom": {"env": "DEXCOM_ACCESS_TOKEN", "module": "providers.dexcom", "class": "DexcomProvider"},
 }
 
 # Detection priority order

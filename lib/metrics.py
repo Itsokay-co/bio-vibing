@@ -4022,6 +4022,187 @@ def compute_forward_signals_extended(sleep: list, readiness: list,
 
 
 # ---------------------------------------------------------------------------
+# Glucose analytics
+# ---------------------------------------------------------------------------
+
+def compute_glucose_variability(glucose: list) -> dict:
+    """Glucose variability: CV, SD, mean, and time-in-range.
+
+    Standard CGM metrics. Time-in-range uses 70-180 mg/dL window.
+    """
+    values = [g.get('value_mgdl') for g in glucose if g.get('value_mgdl') is not None]
+    if len(values) < 20:
+        return {'mean': None, 'sd': None, 'cv': None, 'time_in_range_pct': None,
+                'interpretation': 'insufficient_data', 'n_readings': len(values)}
+
+    avg = mean(values)
+    sd = stdev(values) if len(values) > 1 else 0
+    cv = (sd / avg * 100) if avg > 0 else 0
+
+    in_range = sum(1 for v in values if 70 <= v <= 180)
+    tir_pct = round(in_range / len(values) * 100, 1)
+
+    # Time below / above range
+    below = sum(1 for v in values if v < 70)
+    above = sum(1 for v in values if v > 180)
+
+    if cv < 20:
+        interp = 'stable'
+    elif cv < 36:
+        interp = 'moderate'
+    else:
+        interp = 'high_variability'
+
+    return {
+        'mean': round(avg, 1),
+        'sd': round(sd, 1),
+        'cv': round(cv, 1),
+        'time_in_range_pct': tir_pct,
+        'time_below_pct': round(below / len(values) * 100, 1),
+        'time_above_pct': round(above / len(values) * 100, 1),
+        'interpretation': interp,
+        'n_readings': len(values),
+    }
+
+
+def compute_postmeal_glucose(glucose: list, meals: list) -> dict:
+    """Post-meal glucose response: peak, time-to-peak, recovery per meal.
+
+    Analyzes the 3-hour glucose curve after each meal. Requires both
+    CGM data and meal timestamps.
+    """
+    if not glucose or not meals:
+        return {'responses': [], 'avg_peak_delta': None, 'avg_time_to_peak_min': None,
+                'interpretation': 'insufficient_data'}
+
+    from datetime import datetime, timedelta
+
+    # Build sorted glucose timeline
+    gl_sorted = sorted(
+        [(g['timestamp'], g['value_mgdl']) for g in glucose
+         if g.get('timestamp') and g.get('value_mgdl') is not None],
+        key=lambda x: x[0],
+    )
+    if not gl_sorted:
+        return {'responses': [], 'avg_peak_delta': None, 'interpretation': 'insufficient_data'}
+
+    responses = []
+    for m in meals:
+        ts = m.get('timestamp')
+        if not ts:
+            continue
+        try:
+            meal_dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
+        except (ValueError, TypeError):
+            continue
+
+        # Find glucose in 30min before meal (baseline) and 3h after (response)
+        baseline_start = (meal_dt - timedelta(minutes=30)).isoformat()
+        response_end = (meal_dt + timedelta(hours=3)).isoformat()
+
+        pre_vals = [v for t, v in gl_sorted if baseline_start <= t <= ts]
+        post_vals = [(t, v) for t, v in gl_sorted if ts < t <= response_end]
+
+        if not pre_vals or len(post_vals) < 3:
+            continue
+
+        baseline = mean(pre_vals)
+        peak_val = max(v for _, v in post_vals)
+        peak_delta = peak_val - baseline
+
+        # Time to peak
+        peak_ts = next(t for t, v in post_vals if v == peak_val)
+        try:
+            peak_dt = datetime.fromisoformat(peak_ts.replace('Z', '+00:00'))
+            ttp_min = (peak_dt - meal_dt).total_seconds() / 60
+        except (ValueError, TypeError):
+            ttp_min = None
+
+        # 2h recovery value
+        recovery_start = (meal_dt + timedelta(hours=2)).isoformat()
+        recovery_vals = [v for t, v in post_vals if t >= recovery_start]
+        recovery_val = mean(recovery_vals) if recovery_vals else None
+
+        responses.append({
+            'meal_type': m.get('meal_type'),
+            'meal_time': ts,
+            'baseline_mgdl': round(baseline, 1),
+            'peak_mgdl': round(peak_val, 1),
+            'peak_delta_mgdl': round(peak_delta, 1),
+            'time_to_peak_min': round(ttp_min) if ttp_min else None,
+            'recovery_2h_mgdl': round(recovery_val, 1) if recovery_val else None,
+        })
+
+    if not responses:
+        return {'responses': [], 'avg_peak_delta': None, 'interpretation': 'insufficient_data'}
+
+    deltas = [r['peak_delta_mgdl'] for r in responses]
+    ttps = [r['time_to_peak_min'] for r in responses if r['time_to_peak_min']]
+
+    return {
+        'responses': responses,
+        'avg_peak_delta': round(mean(deltas), 1),
+        'avg_time_to_peak_min': round(mean(ttps)) if ttps else None,
+        'n_meals': len(responses),
+    }
+
+
+def compute_glucose_patterns(glucose: list) -> dict:
+    """Daily glucose patterns: dawn phenomenon detection, nocturnal trends.
+
+    Identifies early-morning glucose rise (dawn effect) and overnight
+    glucose stability.
+    """
+    if not glucose:
+        return {'dawn_effect': None, 'nocturnal_avg': None,
+                'daytime_avg': None, 'interpretation': 'insufficient_data'}
+
+    from datetime import datetime
+
+    nocturnal = []  # 00:00-06:00
+    dawn = []       # 04:00-08:00
+    daytime = []    # 08:00-22:00
+
+    for g in glucose:
+        ts = g.get('timestamp', '')
+        val = g.get('value_mgdl')
+        if not ts or val is None:
+            continue
+        try:
+            dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
+            hour = dt.hour
+        except (ValueError, TypeError):
+            continue
+
+        if 0 <= hour < 6:
+            nocturnal.append(val)
+        if 4 <= hour < 8:
+            dawn.append(val)
+        if 8 <= hour < 22:
+            daytime.append(val)
+
+    noc_avg = round(mean(nocturnal), 1) if len(nocturnal) >= 5 else None
+    dawn_avg = round(mean(dawn), 1) if len(dawn) >= 5 else None
+    day_avg = round(mean(daytime), 1) if len(daytime) >= 5 else None
+
+    # Dawn effect: dawn average notably higher than nocturnal
+    dawn_effect = None
+    if noc_avg is not None and dawn_avg is not None:
+        delta = dawn_avg - noc_avg
+        dawn_effect = round(delta, 1)
+
+    return {
+        'nocturnal_avg': noc_avg,
+        'dawn_avg': dawn_avg,
+        'daytime_avg': day_avg,
+        'dawn_effect_mgdl': dawn_effect,
+        'n_nocturnal': len(nocturnal),
+        'n_dawn': len(dawn),
+        'n_daytime': len(daytime),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Orchestrator — single entry point for all metrics
 # ---------------------------------------------------------------------------
 
@@ -4103,6 +4284,10 @@ def compute_all(data: dict) -> dict:
         ('respiratory_trends', compute_respiratory_trends, data.get('respiration', [])),
         ('active_minutes', compute_active_minutes, data.get('activity', [])),
 
+        # Glucose analytics (CGM)
+        ('glucose_variability', compute_glucose_variability, data.get('glucose', [])),
+        ('glucose_patterns', compute_glucose_patterns, data.get('glucose', [])),
+
         # Baselines, forward signals, estimates (batch 4 — Suna elevation)
         ('personal_baselines', compute_personal_baselines, sleep, readiness,
          spo2, stress, data.get('respiration', [])),
@@ -4134,6 +4319,7 @@ def compute_all(data: dict) -> dict:
             ('caffeine_sleep', compute_caffeine_sleep_coupling, meals, sleep),
             ('food_effects', compute_food_item_effects, meals, sleep),
             ('bdi_meal', compute_bdi_meal_coupling, spo2, meals, sleep),
+            ('postmeal_glucose', compute_postmeal_glucose, data.get('glucose', []), meals),
         ]
         for entry in nutrition_metrics:
             name, func, *args = entry
