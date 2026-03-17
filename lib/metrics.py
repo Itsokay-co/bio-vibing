@@ -65,6 +65,12 @@ METRIC_DEFAULTS = {
     "intensity_moderate_lo": 0.64,
     "intensity_moderate_hi": 0.76,
     "intensity_vigorous_lo": 0.77,
+    # Post-meal HR response
+    "postmeal_hr_blunted": 5,       # peak delta below this = blunted
+    "postmeal_hr_elevated": 20,     # peak delta above this = elevated
+    "postmeal_hr_prolonged_hours": 3,  # still elevated at this point = prolonged
+    # Caffeine
+    "caffeine_high_threshold": 200,  # mg/day above = high caffeine day
 }
 
 # Load user overrides from env
@@ -3016,6 +3022,1006 @@ def compute_active_minutes(activity: list) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Post-meal HR response — Digestive Score proxy from meal + HR data
+# ---------------------------------------------------------------------------
+
+def compute_postmeal_hr_response(meals: list, heartrate: list) -> dict:
+    """Analyze heart rate response curves after meals.
+
+    For each timestamped meal, extracts HR 30min before through 3h after.
+    Computes baseline HR, peak delta, time to peak, taper rate.
+    Aggregates by meal_type and macro profile.
+    """
+    if not meals or not heartrate:
+        return {"per_meal": [], "by_meal_type": {}, "by_macro_profile": {},
+                "n_meals_analyzed": 0, "trend": "insufficient_data"}
+
+    blunted_thresh = METRIC_DEFAULTS.get("postmeal_hr_blunted", 5)
+    elevated_thresh = METRIC_DEFAULTS.get("postmeal_hr_elevated", 20)
+    prolonged_hours = METRIC_DEFAULTS.get("postmeal_hr_prolonged_hours", 3)
+
+    # Index HR by timestamp
+    hr_by_ts = []
+    for h in heartrate:
+        ts = h.get('timestamp')
+        bpm = h.get('bpm')
+        source = h.get('source', '')
+        if ts and bpm and source != 'workout':
+            dt = _parse_iso_dt(ts)
+            if dt:
+                hr_by_ts.append((dt, bpm))
+    hr_by_ts.sort(key=lambda x: x[0])
+
+    if not hr_by_ts:
+        return {"per_meal": [], "by_meal_type": {}, "by_macro_profile": {},
+                "n_meals_analyzed": 0, "trend": "insufficient_data"}
+
+    per_meal = []
+    by_type = {}
+    by_profile = {}
+
+    for m in meals:
+        ts = m.get('timestamp')
+        if not ts:
+            continue
+        meal_dt = _parse_iso_dt(ts)
+        if not meal_dt:
+            continue
+
+        # Make comparison timezone-naive for safety
+        meal_naive = meal_dt.replace(tzinfo=None) if meal_dt.tzinfo else meal_dt
+
+        # Extract HR: 30min before → 3h after
+        pre_window = timedelta(minutes=30)
+        post_window = timedelta(hours=3)
+        pre_hrs = []
+        post_hrs = []
+
+        for dt, bpm in hr_by_ts:
+            dt_naive = dt.replace(tzinfo=None) if dt.tzinfo else dt
+            diff = (dt_naive - meal_naive).total_seconds() / 60.0  # minutes
+            if -30 <= diff < 0:
+                pre_hrs.append(bpm)
+            elif 0 <= diff <= 180:
+                post_hrs.append((diff, bpm))
+
+        if len(pre_hrs) < 2 or len(post_hrs) < 3:
+            continue
+
+        baseline_hr = mean(pre_hrs)
+
+        # Peak
+        peak_bpm = max(bpm for _, bpm in post_hrs)
+        peak_delta = peak_bpm - baseline_hr
+        peak_time = next(t for t, b in post_hrs if b == peak_bpm)
+
+        # HR at 2h and 3h (closest sample)
+        hr_at_2h = None
+        hr_at_3h = None
+        for t, b in post_hrs:
+            if 110 <= t <= 130:
+                hr_at_2h = b
+            if 170 <= t <= 190:
+                hr_at_3h = b
+
+        # Taper rate (bpm/hour decline from peak)
+        taper_rate = None
+        if hr_at_2h is not None and peak_time < 120:
+            hours_diff = (120 - peak_time) / 60
+            if hours_diff > 0:
+                taper_rate = round((peak_bpm - hr_at_2h) / hours_diff, 1)
+
+        # Classification
+        if peak_delta < blunted_thresh:
+            quality = "blunted"
+        elif peak_delta > elevated_thresh:
+            quality = "elevated"
+        elif hr_at_3h and (hr_at_3h - baseline_hr) > blunted_thresh:
+            quality = "prolonged"
+        else:
+            quality = "normal"
+
+        entry = {
+            "day": m.get('day', ''),
+            "meal_type": m.get('meal_type'),
+            "baseline_hr": round(baseline_hr, 1),
+            "peak_hr": round(peak_bpm, 1),
+            "peak_delta": round(peak_delta, 1),
+            "time_to_peak_min": round(peak_time),
+            "hr_at_2h": round(hr_at_2h, 1) if hr_at_2h else None,
+            "taper_rate_bpm_h": taper_rate,
+            "response_quality": quality,
+        }
+        per_meal.append(entry)
+
+        # Aggregate by meal type
+        mt = m.get('meal_type', 'unknown')
+        by_type.setdefault(mt, {"deltas": [], "peaks": []})
+        by_type[mt]["deltas"].append(peak_delta)
+        by_type[mt]["peaks"].append(peak_time)
+
+        # Aggregate by macro profile
+        profile = _classify_meal_profile([m])
+        if profile:
+            by_profile.setdefault(profile, {"deltas": []})
+            by_profile[profile]["deltas"].append(peak_delta)
+
+    # Summarize aggregates
+    by_type_summary = {}
+    for mt, vals in by_type.items():
+        if vals["deltas"]:
+            by_type_summary[mt] = {
+                "avg_peak_delta": round(mean(vals["deltas"]), 1),
+                "avg_time_to_peak": round(mean(vals["peaks"])),
+                "n": len(vals["deltas"]),
+            }
+
+    by_profile_summary = {}
+    for profile, vals in by_profile.items():
+        if vals["deltas"]:
+            by_profile_summary[profile] = {
+                "avg_peak_delta": round(mean(vals["deltas"]), 1),
+                "n": len(vals["deltas"]),
+            }
+
+    # Trend: first half vs second half
+    trend = "insufficient_data"
+    if len(per_meal) >= 6:
+        mid = len(per_meal) // 2
+        first_half = mean(e["peak_delta"] for e in per_meal[:mid])
+        second_half = mean(e["peak_delta"] for e in per_meal[mid:])
+        diff = second_half - first_half
+        if abs(diff) < 2:
+            trend = "stable"
+        elif diff > 0:
+            trend = "increasing"
+        else:
+            trend = "decreasing"
+
+    return {
+        "per_meal": per_meal,
+        "by_meal_type": by_type_summary,
+        "by_macro_profile": by_profile_summary,
+        "n_meals_analyzed": len(per_meal),
+        "trend": trend,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Personal baselines — deviation-from-YOUR-baseline for all core metrics
+# ---------------------------------------------------------------------------
+
+def compute_personal_baselines(sleep: list, readiness: list,
+                               spo2: list = None, stress: list = None,
+                               respiration: list = None,
+                               windows: tuple = (30, 60, 90)) -> dict:
+    """Compute rolling baselines and z-scores for core biometric metrics.
+
+    Returns per-metric: baseline mean/SD for each window, z-scores for
+    recent 1d/3d/7d, percentile rank, and 7-day linear trend direction.
+    """
+    spo2 = spo2 or []
+    stress = stress or []
+    respiration = respiration or []
+
+    # Build day-aligned metric values
+    by_day = {}
+    for s in sleep:
+        d = s.get('day')
+        if not d:
+            continue
+        entry = by_day.setdefault(d, {})
+        for field, key in [('score', 'sleep_score'), ('avg_hrv_ms', 'hrv'),
+                           ('avg_resting_hr_bpm', 'rhr'),
+                           ('deep_sleep_seconds', 'deep'),
+                           ('rem_sleep_seconds', 'rem'),
+                           ('total_sleep_seconds', 'total_sleep'),
+                           ('efficiency', 'efficiency')]:
+            if s.get(field) is not None:
+                entry[key] = s[field]
+
+    for r in readiness:
+        d = r.get('day')
+        if d and r.get('score') is not None:
+            by_day.setdefault(d, {})['readiness_score'] = r['score']
+        if d and r.get('temp_deviation_c') is not None:
+            by_day.setdefault(d, {})['temp_deviation'] = r['temp_deviation_c']
+
+    for s in spo2:
+        d = s.get('day')
+        if d and s.get('avg_spo2_pct') is not None:
+            by_day.setdefault(d, {})['spo2'] = s['avg_spo2_pct']
+
+    for s in stress:
+        d = s.get('day')
+        if d and s.get('stress_high_minutes') is not None:
+            by_day.setdefault(d, {})['stress_min'] = s['stress_high_minutes']
+
+    for r in respiration:
+        d = r.get('day')
+        if d and r.get('avg_respiratory_rate') is not None:
+            by_day.setdefault(d, {})['resp_rate'] = r['avg_respiratory_rate']
+
+    sorted_days = sorted(by_day.keys())
+    if len(sorted_days) < 14:
+        return {"status": "insufficient_data", "days": len(sorted_days),
+                "metrics": {}}
+
+    # All metric keys we track
+    metric_keys = ['hrv', 'rhr', 'deep', 'rem', 'total_sleep', 'efficiency',
+                   'sleep_score', 'readiness_score', 'temp_deviation',
+                   'spo2', 'resp_rate', 'stress_min']
+
+    result = {"status": "ok", "days": len(sorted_days), "metrics": {}}
+
+    for mk in metric_keys:
+        all_vals = [(d, by_day[d][mk]) for d in sorted_days if mk in by_day[d]]
+        if len(all_vals) < 7:
+            continue
+
+        metric_result = {"baselines": {}, "current": {}, "trend_7d": "unknown",
+                         "percentile": None}
+
+        # Rolling baselines for each window
+        for w in windows:
+            window_vals = [v for _, v in all_vals[-w:]] if len(all_vals) >= w else [v for _, v in all_vals]
+            if len(window_vals) >= 7:
+                m = mean(window_vals)
+                s = stdev(window_vals) if len(window_vals) > 1 else 0.001
+                metric_result["baselines"][f"{w}d"] = {
+                    "mean": round(m, 2), "sd": round(s, 3), "n": len(window_vals)
+                }
+
+        # Current 1d, 3d, 7d values + z-scores
+        baseline = metric_result["baselines"].get(f"{windows[0]}d")
+        if not baseline:
+            continue
+
+        bl_mean = baseline["mean"]
+        bl_sd = max(baseline["sd"], 0.001)
+
+        for span_name, span_n in [("1d", 1), ("3d", 3), ("7d", 7)]:
+            recent = [v for _, v in all_vals[-span_n:]]
+            if recent:
+                val = mean(recent)
+                z = (val - bl_mean) / bl_sd
+                metric_result["current"][span_name] = {
+                    "value": round(val, 2),
+                    "z_score": round(z, 2),
+                }
+
+        # Percentile rank: where does current 1d sit in full history
+        if all_vals:
+            current_val = all_vals[-1][1]
+            all_hist = [v for _, v in all_vals]
+            below = sum(1 for v in all_hist if v <= current_val)
+            metric_result["percentile"] = round(below / len(all_hist) * 100, 1)
+
+        # 7-day linear trend (slope direction)
+        recent_7 = [v for _, v in all_vals[-7:]]
+        if len(recent_7) >= 5:
+            n = len(recent_7)
+            x_mean = (n - 1) / 2
+            y_mean = mean(recent_7)
+            num = sum((i - x_mean) * (recent_7[i] - y_mean) for i in range(n))
+            den = sum((i - x_mean) ** 2 for i in range(n))
+            slope = num / den if den != 0 else 0
+            # Normalize slope by SD for interpretation
+            norm_slope = slope / bl_sd if bl_sd > 0 else 0
+            if norm_slope > 0.1:
+                metric_result["trend_7d"] = "rising"
+            elif norm_slope < -0.1:
+                metric_result["trend_7d"] = "declining"
+            else:
+                metric_result["trend_7d"] = "stable"
+
+        result["metrics"][mk] = metric_result
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Caffeine-sleep coupling — uses underutilized caffeine_mg + onset_latency
+# ---------------------------------------------------------------------------
+
+def compute_caffeine_sleep_coupling(meals: list, sleep: list) -> dict:
+    """Correlate daily caffeine intake with sleep onset latency and quality."""
+    if not meals or not sleep:
+        return {"n_days_with_caffeine": 0, "correlations": {}}
+
+    # Daily caffeine totals
+    caff_by_day = {}
+    for m in meals:
+        d = m.get('day')
+        caf = m.get('caffeine_mg')
+        if d and caf is not None and caf > 0:
+            caff_by_day[d] = caff_by_day.get(d, 0) + caf
+
+    # Sleep metrics by day (next-night: caffeine on day X → sleep on day X)
+    sleep_by_day = {}
+    for s in sleep:
+        d = s.get('day')
+        if d and s.get('sleep_type') in ('long_sleep', None):
+            sleep_by_day[d] = s
+
+    # Pair caffeine days with sleep
+    pairs = []
+    for d in caff_by_day:
+        if d in sleep_by_day:
+            pairs.append((caff_by_day[d], sleep_by_day[d]))
+
+    if len(pairs) < 5:
+        return {"n_days_with_caffeine": len(caff_by_day), "correlations": {},
+                "status": "insufficient_paired_data"}
+
+    caffeine_vals = [p[0] for p in pairs]
+    correlations = {}
+
+    for field, label in [('onset_latency_seconds', 'onset_latency'),
+                         ('deep_sleep_seconds', 'deep_sleep'),
+                         ('efficiency', 'efficiency'),
+                         ('avg_hrv_ms', 'hrv')]:
+        vals = [p[1].get(field) for p in pairs]
+        valid = [(c, v) for c, v in zip(caffeine_vals, vals) if v is not None]
+        if len(valid) >= 5:
+            r = _pearson_r([c for c, _ in valid], [v for _, v in valid])
+            correlations[label] = round(r, 3)
+
+    # High vs low caffeine split
+    threshold = METRIC_DEFAULTS.get("caffeine_high_threshold", 200)
+    high = [p for p in pairs if p[0] >= threshold]
+    low = [p for p in pairs if p[0] < threshold]
+
+    high_vs_low = {}
+    if len(high) >= 3 and len(low) >= 3:
+        for field, label in [('onset_latency_seconds', 'onset_latency'),
+                             ('deep_sleep_seconds', 'deep_sleep')]:
+            h_vals = [p[1].get(field) for p in high if p[1].get(field) is not None]
+            l_vals = [p[1].get(field) for p in low if p[1].get(field) is not None]
+            if h_vals and l_vals:
+                high_vs_low[label] = {
+                    "high_caffeine_avg": round(mean(h_vals), 1),
+                    "low_caffeine_avg": round(mean(l_vals), 1),
+                }
+
+    return {
+        "n_days_with_caffeine": len(caff_by_day),
+        "daily_avg_mg": round(mean(caffeine_vals), 1) if caffeine_vals else 0,
+        "correlations": correlations,
+        "high_vs_low": high_vs_low,
+        "n_paired_days": len(pairs),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Food-item effects — which specific foods affect sleep
+# ---------------------------------------------------------------------------
+
+def compute_food_item_effects(meals: list, sleep: list,
+                              min_occurrences: int = 3) -> dict:
+    """Parse foods list for food-item-level sleep impact analysis."""
+    if not meals or not sleep:
+        return {"n_foods_analyzed": 0, "food_effects": {}}
+
+    sleep_by_day = {}
+    for s in sleep:
+        if s.get('day') and s.get('sleep_type') in ('long_sleep', None):
+            sleep_by_day[s['day']] = s
+
+    # Count food → nights mapping (evening meals → next night)
+    food_nights = {}  # food_name → list of sleep records
+    all_sleep_days = set(sleep_by_day.keys())
+
+    for s_day in sorted(sleep_by_day.keys()):
+        evening_meals = _get_previous_evening_meals(meals, s_day)
+        foods_this_night = set()
+        for m in evening_meals:
+            if m.get('foods') and isinstance(m['foods'], list):
+                for f in m['foods']:
+                    name = (f.get('name') or '').lower().strip()
+                    if name and len(name) > 1:
+                        foods_this_night.add(name)
+
+        for name in foods_this_night:
+            food_nights.setdefault(name, []).append(sleep_by_day[s_day])
+
+    # Bayesian comparison for foods with enough data
+    metrics_to_test = [
+        ('avg_hrv_ms', 'HRV', True),
+        ('deep_sleep_seconds', 'Deep Sleep', True),
+        ('efficiency', 'Efficiency', True),
+        ('onset_latency_seconds', 'Onset Latency', False),
+    ]
+
+    food_effects = {}
+    for food_name, tagged_sleeps in food_nights.items():
+        if len(tagged_sleeps) < min_occurrences:
+            continue
+
+        tagged_days = {s['day'] for s in tagged_sleeps}
+        untagged_sleeps = [sleep_by_day[d] for d in all_sleep_days - tagged_days]
+
+        if len(untagged_sleeps) < 3:
+            continue
+
+        effects = {}
+        for field, label, higher_better in metrics_to_test:
+            t_vals = [s[field] for s in tagged_sleeps if s.get(field) is not None]
+            u_vals = [s[field] for s in untagged_sleeps if s.get(field) is not None]
+
+            if len(t_vals) < min_occurrences or len(u_vals) < 3:
+                continue
+
+            diff = mean(t_vals) - mean(u_vals)
+            t_var = stdev(t_vals) ** 2 if len(t_vals) > 1 else 1
+            u_var = stdev(u_vals) ** 2 if len(u_vals) > 1 else 1
+            pooled_sd = ((t_var + u_var) / 2) ** 0.5
+            cohens_d = round(diff / pooled_sd, 2) if pooled_sd > 0 else 0
+
+            effects[label] = {
+                "mean_diff": round(diff, 1),
+                "cohens_d": cohens_d,
+                "direction": "better" if (diff > 0) == higher_better else "worse",
+            }
+
+        if effects:
+            food_effects[food_name] = {"n_nights": len(tagged_sleeps), "metrics": effects}
+
+    # Sort by strongest absolute effect
+    sorted_foods = sorted(food_effects.items(),
+                          key=lambda x: max(abs(m['cohens_d'])
+                                            for m in x[1]['metrics'].values()),
+                          reverse=True)
+
+    best = [n for n, e in sorted_foods[:5]
+            if any(m['direction'] == 'better' for m in e['metrics'].values())]
+    worst = [n for n, e in sorted_foods[:5]
+             if any(m['direction'] == 'worse' for m in e['metrics'].values())]
+
+    return {
+        "food_effects": dict(sorted_foods[:10]),
+        "best_foods": best[:5],
+        "worst_foods": worst[:5],
+        "n_foods_analyzed": len(food_effects),
+        "min_occurrences": min_occurrences,
+    }
+
+
+# ---------------------------------------------------------------------------
+# BDI-meal coupling — dinner macros × breathing disturbance index
+# ---------------------------------------------------------------------------
+
+def compute_bdi_meal_coupling(spo2: list, meals: list, sleep: list) -> dict:
+    """Correlate dinner composition with breathing disturbance index."""
+    if not spo2 or not meals or not sleep:
+        return {"n_nights": 0, "correlations": {}}
+
+    bdi_by_day = {}
+    for s in spo2:
+        d = s.get('day')
+        bdi = s.get('breathing_disturbance_index')
+        if d and bdi is not None:
+            bdi_by_day[d] = bdi
+
+    if len(bdi_by_day) < 5:
+        return {"n_nights": len(bdi_by_day), "correlations": {},
+                "status": "insufficient_bdi_data"}
+
+    # Pair BDI with previous evening meals
+    pairs = []
+    for day, bdi in bdi_by_day.items():
+        evening = _get_previous_evening_meals(meals, day)
+        if evening:
+            total_fat = sum(m.get('fat_g') or 0 for m in evening)
+            total_sat = sum(m.get('saturated_fat_g') or 0 for m in evening)
+            total_alc = sum(m.get('alcohol_units') or 0 for m in evening)
+            total_cal = sum(m.get('calories') or 0 for m in evening)
+            pairs.append((bdi, total_fat, total_sat, total_alc, total_cal))
+
+    if len(pairs) < 5:
+        return {"n_nights": len(pairs), "correlations": {},
+                "status": "insufficient_paired_data"}
+
+    bdi_vals = [p[0] for p in pairs]
+    correlations = {}
+    for idx, label in [(1, 'fat_g'), (2, 'saturated_fat_g'),
+                       (3, 'alcohol_units'), (4, 'calories')]:
+        vals = [p[idx] for p in pairs]
+        if any(v > 0 for v in vals):
+            r = _pearson_r(bdi_vals, vals)
+            correlations[label] = round(r, 3)
+
+    return {"n_nights": len(pairs), "correlations": correlations}
+
+
+# ---------------------------------------------------------------------------
+# Forward signals — predictive projections
+# ---------------------------------------------------------------------------
+
+def compute_forward_signals(sleep: list, readiness: list,
+                            workouts: list = None) -> dict:
+    """Forward-looking projections: sleep debt payback, ACWR trajectory, HRV trend."""
+    workouts = workouts or []
+    result = {}
+
+    # Sleep debt payback
+    target_hours = 7.5
+    recent_7d = sorted([s for s in sleep if s.get('total_sleep_seconds')],
+                       key=lambda x: x['day'])[-7:]
+    if recent_7d:
+        avg_hours = mean([s['total_sleep_seconds'] / 3600 for s in recent_7d])
+        weekly_debt = sum(max(0, target_hours - s['total_sleep_seconds'] / 3600)
+                         for s in recent_7d)
+        surplus_per_night = max(0, avg_hours - target_hours)
+        nights_to_clear = (round(weekly_debt / surplus_per_night)
+                           if surplus_per_night > 0.1 else None)
+        result["sleep_debt"] = {
+            "weekly_debt_hours": round(weekly_debt, 1),
+            "avg_hours_per_night": round(avg_hours, 1),
+            "nights_to_clear": nights_to_clear,
+        }
+
+    # HRV 7-day linear projection
+    recent_hrv = sorted([s for s in sleep if s.get('avg_hrv_ms')],
+                        key=lambda x: x['day'])[-14:]
+    if len(recent_hrv) >= 7:
+        vals = [s['avg_hrv_ms'] for s in recent_hrv[-7:]]
+        n = len(vals)
+        x_mean = (n - 1) / 2
+        y_mean = mean(vals)
+        num = sum((i - x_mean) * (vals[i] - y_mean) for i in range(n))
+        den = sum((i - x_mean) ** 2 for i in range(n))
+        slope = num / den if den > 0 else 0
+        projected_7d = y_mean + slope * 7
+        result["hrv_projection"] = {
+            "current_7d_avg": round(y_mean, 1),
+            "slope_per_day": round(slope, 2),
+            "projected_7d": round(projected_7d, 1),
+            "direction": "rising" if slope > 0.2 else "declining" if slope < -0.2 else "stable",
+        }
+
+    # ACWR trajectory (if training data exists)
+    if workouts:
+        # Simple weekly load from workout count/duration
+        from collections import Counter
+        workout_by_week = Counter()
+        for w in workouts:
+            d = w.get('day', '')
+            dur = w.get('duration_seconds') or 0
+            if d:
+                # Approximate week number
+                try:
+                    dt = datetime.strptime(d, "%Y-%m-%d")
+                    week = dt.isocalendar()[1]
+                    workout_by_week[week] += dur / 60  # minutes
+                except ValueError:
+                    pass
+
+        if len(workout_by_week) >= 2:
+            weeks = sorted(workout_by_week.keys())
+            current_week = workout_by_week[weeks[-1]]
+            prev_weeks = [workout_by_week[w] for w in weeks[:-1]]
+            chronic = mean(prev_weeks) if prev_weeks else 1
+            acwr = current_week / chronic if chronic > 0 else 0
+            result["acwr_trajectory"] = {
+                "current_week_min": round(current_week, 1),
+                "chronic_avg_min": round(chronic, 1),
+                "acwr": round(acwr, 2),
+                "zone": ("undertraining" if acwr < 0.8 else
+                         "sweet_spot" if acwr < 1.3 else
+                         "overreaching" if acwr < 1.5 else "danger"),
+            }
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Gut score correlations — Suna scores × wearable patterns
+# ---------------------------------------------------------------------------
+
+def compute_gut_score_correlations(gut_scores: list, sleep: list,
+                                   workouts: list = None) -> dict:
+    """Correlate Suna gut scores with wearable metrics."""
+    workouts = workouts or []
+    if not gut_scores or not sleep:
+        return {"n_days": 0, "correlations": {}}
+
+    gs_by_day = {g.get('day', g.get('date', '')): g.get('score', 0)
+                 for g in gut_scores if g.get('score') is not None}
+    sleep_by_day = {s['day']: s for s in sleep
+                    if s.get('day') and s.get('sleep_type') in ('long_sleep', None)}
+
+    # Gut score → next-night sleep
+    pairs = []
+    for d, score in gs_by_day.items():
+        # Next day's sleep
+        try:
+            next_day = (datetime.strptime(d, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+        if next_day in sleep_by_day:
+            pairs.append((score, sleep_by_day[next_day]))
+
+    correlations = {}
+    if len(pairs) >= 5:
+        scores = [p[0] for p in pairs]
+        for field, label in [('score', 'sleep_score'), ('avg_hrv_ms', 'hrv'),
+                             ('deep_sleep_seconds', 'deep_sleep'),
+                             ('efficiency', 'efficiency')]:
+            vals = [p[1].get(field) for p in pairs]
+            valid = [(s, v) for s, v in zip(scores, vals) if v is not None]
+            if len(valid) >= 5:
+                r = _pearson_r([s for s, _ in valid], [v for _, v in valid])
+                correlations[f"gut_score_vs_{label}"] = round(r, 3)
+
+    # Gut score by day of week
+    by_dow = {}
+    for d, score in gs_by_day.items():
+        try:
+            dow = datetime.strptime(d, "%Y-%m-%d").strftime("%A")
+            by_dow.setdefault(dow, []).append(score)
+        except ValueError:
+            pass
+
+    dow_avgs = {dow: round(mean(vals), 1)
+                for dow, vals in by_dow.items() if len(vals) >= 2}
+
+    # Best/worst days
+    if dow_avgs:
+        best_day = max(dow_avgs, key=dow_avgs.get)
+        worst_day = min(dow_avgs, key=dow_avgs.get)
+    else:
+        best_day = worst_day = None
+
+    return {
+        "n_days": len(gs_by_day),
+        "avg_score": round(mean(gs_by_day.values()), 1) if gs_by_day else 0,
+        "correlations": correlations,
+        "by_day_of_week": dow_avgs,
+        "best_day": best_day,
+        "worst_day": worst_day,
+        "n_paired": len(pairs),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Digestive state biometrics — HR/HRV by fed vs fasted (from Suna labels)
+# ---------------------------------------------------------------------------
+
+def compute_digestive_state_biometrics(digestive_states: list,
+                                       heartrate: list,
+                                       sleep: list) -> dict:
+    """Use Suna's digestive state labels to contextualize wearable data."""
+    if not digestive_states or not sleep:
+        return {"n_states": 0}
+
+    # Processing time → sleep quality
+    processing_by_day = {}
+    for ds in digestive_states:
+        d = ds.get('day', ds.get('date', ''))
+        pt = ds.get('duration_min')
+        if d and pt is not None:
+            processing_by_day.setdefault(d, []).append(pt)
+
+    avg_processing_by_day = {d: mean(pts) for d, pts in processing_by_day.items()}
+
+    sleep_by_day = {s['day']: s for s in sleep
+                    if s.get('day') and s.get('sleep_type') in ('long_sleep', None)}
+
+    # Long vs short processing → sleep
+    pairs = []
+    for d, avg_pt in avg_processing_by_day.items():
+        # Next night sleep
+        try:
+            next_day = (datetime.strptime(d, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+        if next_day in sleep_by_day:
+            pairs.append((avg_pt, sleep_by_day[next_day]))
+
+    result = {"n_states": len(digestive_states), "n_paired_days": len(pairs)}
+
+    if len(pairs) >= 5:
+        pt_vals = [p[0] for p in pairs]
+        for field, label in [('score', 'sleep_score'), ('avg_hrv_ms', 'hrv'),
+                             ('deep_sleep_seconds', 'deep_sleep')]:
+            s_vals = [p[1].get(field) for p in pairs]
+            valid = [(pt, sv) for pt, sv in zip(pt_vals, s_vals) if sv is not None]
+            if len(valid) >= 5:
+                r = _pearson_r([p for p, _ in valid], [v for _, v in valid])
+                result[f"processing_time_vs_{label}"] = round(r, 3)
+
+        # Split: long (>median) vs short processing
+        median_pt = sorted(pt_vals)[len(pt_vals) // 2]
+        long_sleep = [p[1] for p in pairs if p[0] > median_pt]
+        short_sleep = [p[1] for p in pairs if p[0] <= median_pt]
+
+        if len(long_sleep) >= 3 and len(short_sleep) >= 3:
+            for field, label in [('score', 'sleep_score'), ('avg_hrv_ms', 'hrv')]:
+                l_vals = [s[field] for s in long_sleep if s.get(field) is not None]
+                s_vals = [s[field] for s in short_sleep if s.get(field) is not None]
+                if l_vals and s_vals:
+                    result[f"long_processing_{label}"] = round(mean(l_vals), 1)
+                    result[f"short_processing_{label}"] = round(mean(s_vals), 1)
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Correlation discovery — auto-find what predicts best/worst sleep
+# ---------------------------------------------------------------------------
+
+def compute_correlation_discovery(data: dict, min_n: int = 7) -> dict:
+    """Automatically discover what features correlate with sleep outcomes."""
+    sleep = data.get('sleep', [])
+    meals = data.get('meals', [])
+    workouts = data.get('workouts', [])
+    tags = data.get('tags', [])
+    gut_scores = data.get('gut_scores', [])
+
+    if len(sleep) < 14:
+        return {"status": "insufficient_data", "correlations": []}
+
+    sleep_by_day = {}
+    for s in sleep:
+        if s.get('day') and s.get('sleep_type') in ('long_sleep', None):
+            sleep_by_day[s['day']] = s
+
+    sorted_days = sorted(sleep_by_day.keys())
+
+    # Build per-day features
+    features_by_day = {}
+    for d in sorted_days:
+        features_by_day[d] = {}
+
+    # Workout features
+    workout_days = set()
+    for w in workouts:
+        wd = w.get('day')
+        if wd:
+            workout_days.add(wd)
+            ts = w.get('start_time')
+            if ts:
+                dt = _parse_iso_dt(ts)
+                if dt:
+                    features_by_day.setdefault(wd, {})['workout_hour'] = dt.hour
+
+    for d in sorted_days:
+        features_by_day[d]['workout'] = 1 if d in workout_days else 0
+
+    # Meal features (same day → that night's sleep)
+    meals_by_day = {}
+    for m in meals:
+        md = m.get('day')
+        if md:
+            meals_by_day.setdefault(md, []).append(m)
+
+    for d in sorted_days:
+        day_meals = meals_by_day.get(d, [])
+        if day_meals:
+            total_caf = sum(m.get('caffeine_mg') or 0 for m in day_meals)
+            if total_caf > 0:
+                features_by_day[d]['caffeine_mg'] = total_caf
+            total_cal = sum(m.get('calories') or 0 for m in day_meals)
+            if total_cal > 0:
+                features_by_day[d]['calories'] = total_cal
+
+            # Last meal timing
+            timestamped = [m for m in day_meals if m.get('timestamp')]
+            if timestamped:
+                last_ts = max(m['timestamp'] for m in timestamped)
+                last_dt = _parse_iso_dt(last_ts)
+                if last_dt:
+                    features_by_day[d]['last_meal_hour'] = _to_local_hour(last_dt)
+
+    # Gut score features
+    for gs in gut_scores:
+        gd = gs.get('day', gs.get('date', ''))
+        sc = gs.get('score')
+        if gd and sc is not None:
+            features_by_day.setdefault(gd, {})['gut_score'] = sc
+
+    # Day of week
+    for d in sorted_days:
+        try:
+            dow = datetime.strptime(d, "%Y-%m-%d").weekday()
+            features_by_day[d]['is_weekend'] = 1 if dow >= 5 else 0
+        except ValueError:
+            pass
+
+    # Correlate each feature against sleep outcomes
+    outcomes = [('score', 'sleep_score'), ('avg_hrv_ms', 'hrv'),
+                ('deep_sleep_seconds', 'deep_sleep'), ('efficiency', 'efficiency')]
+
+    correlations = []
+    feature_names = set()
+    for fd in features_by_day.values():
+        feature_names.update(fd.keys())
+
+    for feat_name in feature_names:
+        for sleep_field, outcome_label in outcomes:
+            feat_vals = []
+            outcome_vals = []
+            for d in sorted_days:
+                fv = features_by_day.get(d, {}).get(feat_name)
+                ov = sleep_by_day[d].get(sleep_field)
+                if fv is not None and ov is not None:
+                    feat_vals.append(fv)
+                    outcome_vals.append(ov)
+
+            if len(feat_vals) >= min_n:
+                r = _pearson_r(feat_vals, outcome_vals)
+                if abs(r) >= 0.15:
+                    correlations.append({
+                        "feature": feat_name,
+                        "outcome": outcome_label,
+                        "r": round(r, 3),
+                        "n": len(feat_vals),
+                        "direction": "positive" if r > 0 else "negative",
+                    })
+
+    # Sort by absolute r
+    correlations.sort(key=lambda x: abs(x['r']), reverse=True)
+
+    # Best/worst night profiles
+    scored_days = [(d, sleep_by_day[d].get('score', 0)) for d in sorted_days
+                   if sleep_by_day[d].get('score') is not None]
+    scored_days.sort(key=lambda x: x[1], reverse=True)
+
+    best_profile = worst_profile = None
+    if len(scored_days) >= 10:
+        top5 = scored_days[:5]
+        bottom5 = scored_days[-5:]
+
+        def common_factors(days_list):
+            factors = []
+            for d, _ in days_list:
+                f = features_by_day.get(d, {})
+                if f.get('workout'):
+                    factors.append('workout')
+                if f.get('is_weekend'):
+                    factors.append('weekend')
+                if f.get('gut_score') and f['gut_score'] >= 75:
+                    factors.append('gut_score_high')
+            from collections import Counter
+            counts = Counter(factors)
+            return [f for f, c in counts.most_common(3) if c >= 2]
+
+        best_profile = {
+            "avg_score": round(mean(s for _, s in top5), 1),
+            "common_factors": common_factors(top5),
+        }
+        worst_profile = {
+            "avg_score": round(mean(s for _, s in bottom5), 1),
+            "common_factors": common_factors(bottom5),
+        }
+
+    return {
+        "status": "ok",
+        "correlations": correlations[:15],
+        "best_nights": best_profile,
+        "worst_nights": worst_profile,
+        "n_days_analyzed": len(sorted_days),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Open estimate proxies — wearable-only versions of Suna API estimates
+# ---------------------------------------------------------------------------
+
+def compute_stress_proxy(sleep: list, readiness: list,
+                         meals: list = None) -> dict:
+    """Stress estimate from HRV + sleep quality + meal timing.
+
+    Open version — works with any wearable. Suna API version adds
+    additional sensor data for a more complete picture.
+    """
+    meals = meals or []
+
+    recent = sorted([s for s in sleep if s.get('avg_hrv_ms')],
+                    key=lambda x: x['day'])[-7:]
+    if len(recent) < 3:
+        return {"stress_level": None, "status": "insufficient_data"}
+
+    # Component 1: HRV (lower = more stress)
+    hrv_vals = [s['avg_hrv_ms'] for s in recent]
+    hrv_mean = mean(hrv_vals)
+
+    # Component 2: Sleep quality (lower score = more stress)
+    score_vals = [s.get('score', 70) for s in recent if s.get('score')]
+    sleep_quality = mean(score_vals) if score_vals else 70
+
+    # Component 3: Late meal timing penalty
+    late_meal_penalty = 0
+    if meals:
+        recent_days = {s['day'] for s in recent}
+        for m in meals:
+            if m.get('day') in recent_days and m.get('timestamp'):
+                dt = _parse_iso_dt(m['timestamp'])
+                if dt and _to_local_hour(dt) >= 21:
+                    late_meal_penalty += 0.1  # per late meal
+
+    # Normalize to 0-100 (higher = more stress)
+    # HRV contribution: map 20-50ms → 100-0
+    hrv_component = max(0, min(100, (50 - hrv_mean) / 30 * 100))
+    # Sleep contribution: map 50-90 score → 100-0
+    sleep_component = max(0, min(100, (90 - sleep_quality) / 40 * 100))
+
+    stress = (hrv_component * 0.5 + sleep_component * 0.4 +
+              min(late_meal_penalty, 1.0) * 10)
+    stress = max(0, min(100, round(stress)))
+
+    if stress >= 70:
+        level = "high"
+    elif stress >= 40:
+        level = "moderate"
+    else:
+        level = "low"
+
+    return {
+        "stress_level": stress,
+        "level": level,
+        "components": {
+            "hrv_contribution": round(hrv_component, 1),
+            "sleep_contribution": round(sleep_component, 1),
+            "late_meal_penalty": round(min(late_meal_penalty, 1.0) * 10, 1),
+        },
+    }
+
+
+def compute_inflammation_proxy(sleep: list, readiness: list) -> dict:
+    """Inflammation direction from RHR + HRV + sleep quality.
+
+    Directional estimate — small effect size, not diagnostic.
+    """
+    recent = sorted([s for s in sleep if s.get('avg_resting_hr_bpm')],
+                    key=lambda x: x['day'])[-14:]
+    if len(recent) < 7:
+        return {"inflammation_direction": None, "status": "insufficient_data"}
+
+    rhr_vals = [s['avg_resting_hr_bpm'] for s in recent]
+    hrv_vals = [s['avg_hrv_ms'] for s in recent if s.get('avg_hrv_ms')]
+    eff_vals = [s['efficiency'] for s in recent if s.get('efficiency')]
+
+    # Higher RHR, lower HRV, lower efficiency = higher inflammation
+    rhr_mean = mean(rhr_vals)
+    hrv_mean = mean(hrv_vals) if hrv_vals else 35
+    eff_mean = mean(eff_vals) if eff_vals else 85
+
+    # Normalized score: 0 = low inflammation, 100 = high
+    rhr_component = max(0, min(100, (rhr_mean - 50) / 25 * 100))
+    hrv_component = max(0, min(100, (50 - hrv_mean) / 30 * 100))
+    eff_component = max(0, min(100, (95 - eff_mean) / 20 * 100))
+
+    score = round(rhr_component * 0.4 + hrv_component * 0.4 + eff_component * 0.2)
+    score = max(0, min(100, score))
+
+    if score >= 60:
+        direction = "elevated"
+    elif score >= 30:
+        direction = "moderate"
+    else:
+        direction = "low"
+
+    return {
+        "inflammation_score": score,
+        "inflammation_direction": direction,
+        "components": {
+            "rhr_mean": round(rhr_mean, 1),
+            "hrv_mean": round(hrv_mean, 1),
+            "efficiency_mean": round(eff_mean, 1),
+        },
+        "n_days": len(recent),
+    }
+
+
+def compute_forward_signals_extended(sleep: list, readiness: list,
+                                      workouts: list = None) -> dict:
+    """Alias — compute_forward_signals already covers this."""
+    return compute_forward_signals(sleep, readiness, workouts)
+
+
+# ---------------------------------------------------------------------------
 # Orchestrator — single entry point for all metrics
 # ---------------------------------------------------------------------------
 
@@ -3096,6 +4102,13 @@ def compute_all(data: dict) -> dict:
         ('workout_pace', compute_workout_pace, workouts),
         ('respiratory_trends', compute_respiratory_trends, data.get('respiration', [])),
         ('active_minutes', compute_active_minutes, data.get('activity', [])),
+
+        # Baselines, forward signals, estimates (batch 4 — Suna elevation)
+        ('personal_baselines', compute_personal_baselines, sleep, readiness,
+         spo2, stress, data.get('respiration', [])),
+        ('forward_signals', compute_forward_signals, sleep, readiness, workouts),
+        ('stress_proxy', compute_stress_proxy, sleep, readiness, meals),
+        ('inflammation_proxy', compute_inflammation_proxy, sleep, readiness),
     ]
 
     results = {'cycle': cycle, '_errors': []}
@@ -3116,6 +4129,11 @@ def compute_all(data: dict) -> dict:
             ('macro_hrv', compute_macro_hrv_coupling, meals, sleep, cycle_or_none),
             ('nutrition_periodization', compute_nutrition_periodization,
              meals, workouts, sleep, cycle_or_none),
+            # New meal-dependent metrics (batch 4)
+            ('postmeal_hr', compute_postmeal_hr_response, meals, heartrate),
+            ('caffeine_sleep', compute_caffeine_sleep_coupling, meals, sleep),
+            ('food_effects', compute_food_item_effects, meals, sleep),
+            ('bdi_meal', compute_bdi_meal_coupling, spo2, meals, sleep),
         ]
         for entry in nutrition_metrics:
             name, func, *args = entry
@@ -3123,5 +4141,35 @@ def compute_all(data: dict) -> dict:
             results[key] = value
             if isinstance(value, dict) and 'error' in value:
                 results['_errors'].append(f"{key}: {value['error']}")
+
+    # Suna score analytics (only if Suna API scores exist)
+    gut_scores = data.get('gut_scores', [])
+    digestive_states = data.get('digestive_states', [])
+    if gut_scores:
+        suna_metrics = [
+            ('gut_correlations', compute_gut_score_correlations,
+             gut_scores, sleep, workouts),
+        ]
+        for entry in suna_metrics:
+            name, func, *args = entry
+            key, value = _safe_compute(name, func, *args)
+            results[key] = value
+            if isinstance(value, dict) and 'error' in value:
+                results['_errors'].append(f"{key}: {value['error']}")
+
+    if digestive_states:
+        key, value = _safe_compute('state_biometrics',
+                                   compute_digestive_state_biometrics,
+                                   digestive_states, heartrate, sleep)
+        results[key] = value
+        if isinstance(value, dict) and 'error' in value:
+            results['_errors'].append(f"{key}: {value['error']}")
+
+    # Correlation discovery (uses full data dict)
+    key, value = _safe_compute('correlation_discovery',
+                               compute_correlation_discovery, data)
+    results[key] = value
+    if isinstance(value, dict) and 'error' in value:
+        results['_errors'].append(f"{key}: {value['error']}")
 
     return results

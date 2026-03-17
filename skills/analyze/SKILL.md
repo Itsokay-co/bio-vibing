@@ -166,6 +166,38 @@ if heartrate:
             print(f"    Pre:  {pre_im['combined_minutes']} min")
             print(f"    Post: {post_im['combined_minutes']} min")
 
+# --- Personal Baseline Context (NEW) ---
+from metrics import compute_personal_baselines
+bl = compute_personal_baselines(sleep, readiness)
+if bl.get('status') == 'ok':
+    print(f"\n  BASELINE CONTEXT:")
+    for mk in ['hrv', 'rhr', 'sleep_score', 'efficiency']:
+        m = bl['metrics'].get(mk, {})
+        b30 = m.get('baselines', {}).get('30d', {})
+        if b30.get('mean') is not None:
+            # Where does post-period sit vs full baseline?
+            post_vals = [s.get({'hrv': 'avg_hrv_ms', 'rhr': 'avg_resting_hr_bpm',
+                               'sleep_score': 'score', 'efficiency': 'efficiency'}[mk])
+                        for s in post_sleep
+                        if s.get({'hrv': 'avg_hrv_ms', 'rhr': 'avg_resting_hr_bpm',
+                                 'sleep_score': 'score', 'efficiency': 'efficiency'}[mk]) is not None]
+            if post_vals:
+                post_mean = mean(post_vals)
+                z = round((post_mean - b30['mean']) / max(b30['sd'], 0.001), 2)
+                print(f"    {mk}: post-period {round(post_mean, 1)} vs 30d baseline {b30['mean']} (z={'+' if z>0 else ''}{z})")
+
+# --- Gut Score Context (NEW, if Suna connected) ---
+gut_scores = d.get('gut_scores', [])
+if gut_scores:
+    pre_gs = [g['score'] for g in gut_scores if g.get('day', '') < event_dates[0] and g.get('score')]
+    post_gs = [g['score'] for g in gut_scores if g.get('day', '') >= event_dates[0] and g.get('score')]
+    if pre_gs and post_gs:
+        print(f"\n  GUT SCORE:")
+        print(f"    Pre:  {round(mean(pre_gs))} avg (n={len(pre_gs)})")
+        print(f"    Post: {round(mean(post_gs))} avg (n={len(post_gs)})")
+        diff = round(mean(post_gs) - mean(pre_gs))
+        print(f"    Change: {'+' if diff>0 else ''}{diff}")
+
 print()
 PYEOF
 ```

@@ -27,7 +27,9 @@ from metrics import (compute_hrv_cv, compute_sleep_regularity,
                      compute_training_load, compute_chronotype,
                      compute_alcohol_detection, compute_early_warning_signals,
                      compute_hr_zones, compute_intensity_minutes,
-                     compute_recovery_index, compute_respiratory_trends)
+                     compute_recovery_index, compute_respiratory_trends,
+                     compute_personal_baselines, compute_forward_signals,
+                     compute_gut_score_correlations)
 from dataclasses import asdict
 from datetime import datetime, timedelta
 from statistics import mean, stdev
@@ -338,6 +340,64 @@ if scored:
     worst_night = min(scored, key=lambda s: s['score'])
     print(f"\n  Best night:  {best_night['day']} (score {best_night['score']}, {(best_night.get('total_sleep_seconds') or 0)/3600:.1f}h)")
     print(f"  Worst night: {worst_night['day']} (score {worst_night['score']}, {(worst_night.get('total_sleep_seconds') or 0)/3600:.1f}h)")
+
+# --- Personal Baselines (NEW) ---
+spo2 = d.get('spo2', [])
+stress_data = d.get('stress', [])
+bl = compute_personal_baselines(sleep, readiness, spo2, stress_data, respiration)
+if bl.get('status') == 'ok':
+    print("---")
+    print("YOUR BASELINE (30d)")
+    for mk in ['hrv', 'rhr', 'sleep_score', 'deep', 'efficiency']:
+        m = bl['metrics'].get(mk, {})
+        baseline = m.get('baselines', {}).get('30d', {})
+        current = m.get('current', {}).get('7d', {})
+        if baseline.get('mean') is not None and current.get('z_score') is not None:
+            z = current['z_score']
+            print(f"  {mk}: {baseline['mean']} avg — this week z={'+' if z>0 else ''}{z}")
+
+# --- Forward Signals (NEW) ---
+fs = compute_forward_signals(sleep, readiness, d.get('workouts', []))
+if fs:
+    print()
+    print("LOOKING AHEAD")
+    debt = fs.get('sleep_debt', {})
+    if debt.get('weekly_debt_hours') is not None:
+        ntc = debt.get('nights_to_clear')
+        print(f"  Sleep debt: {debt['weekly_debt_hours']}h" +
+              (f" — clears in ~{ntc} nights" if ntc else " — not clearing at current pace"))
+    hrv_p = fs.get('hrv_projection', {})
+    if hrv_p.get('direction'):
+        print(f"  HRV: {hrv_p['direction']} ({hrv_p.get('slope_per_day', 0)}/day), projected 7d: {hrv_p.get('projected_7d')}")
+    acwr = fs.get('acwr_trajectory', {})
+    if acwr.get('zone'):
+        print(f"  Training: ACWR {acwr['acwr']} ({acwr['zone']})")
+
+# --- Gut Score Trend (NEW, if Suna connected) ---
+gut_scores = d.get('gut_scores', [])
+if gut_scores:
+    from statistics import mean as _mean
+    scores = [g.get('score', 0) for g in gut_scores if g.get('score') is not None]
+    if scores:
+        # This week vs last week
+        this_week_gs = [g for g in gut_scores if g.get('day', '') >= this_week_start]
+        last_week_gs = [g for g in gut_scores if last_week_start <= g.get('day', '') < this_week_start]
+        tw_scores = [g['score'] for g in this_week_gs if g.get('score')]
+        lw_scores = [g['score'] for g in last_week_gs if g.get('score')]
+        print()
+        print("GUT SCORE")
+        if tw_scores:
+            print(f"  This week avg: {round(_mean(tw_scores))}", end="")
+            if lw_scores:
+                diff = round(_mean(tw_scores) - _mean(lw_scores))
+                print(f" ({'+' if diff>0 else ''}{diff} vs last week)", end="")
+            print()
+
+        gc = compute_gut_score_correlations(gut_scores, sleep)
+        corr = gc.get('correlations', {})
+        for k, v in corr.items():
+            if abs(v) >= 0.2:
+                print(f"  {k}: r={v}")
 
 print()
 PYEOF

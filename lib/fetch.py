@@ -111,13 +111,13 @@ def fetch_biometrics(
                 setattr(data, attr, [])
                 data.warnings.append(f"Failed to fetch {category}: {e}")
 
-    # Meals from Suna provider (separate from wearable provider)
+    # Suna API — meals + scores (single integration point)
     try:
         from providers.suna import SunaProvider
         suna = SunaProvider()
-        cached_meals = None
-        if use_cache:
-            cached_meals = cache.get_cached("suna", start_date, end_date, "meals")
+
+        # Meals
+        cached_meals = cache.get_cached("suna", start_date, end_date, "meals") if use_cache else None
         if cached_meals is not None:
             data.meals = cached_meals
         else:
@@ -126,10 +126,32 @@ def fetch_biometrics(
             data.meals = serialized_meals
             if use_cache:
                 cache.set_cached("suna", start_date, end_date, "meals", serialized_meals)
+
+        # Proprietary scores (gut scores, overnight, states, windows, insights)
+        for category, fetch_fn, attr in [
+            ("gut_scores", suna.fetch_gut_scores, "gut_scores"),
+            ("overnight_scores", suna.fetch_overnight_scores, "overnight_scores"),
+            ("digestive_states", suna.fetch_digestive_states, "digestive_states"),
+            ("daily_windows", suna.fetch_windows, "daily_windows"),
+            ("suna_insights", suna.fetch_insights, "suna_insights"),
+        ]:
+            try:
+                cached = cache.get_cached("suna", start_date, end_date, category) if use_cache else None
+                if cached is not None:
+                    setattr(data, attr, cached)
+                else:
+                    result = fetch_fn(start_date, end_date)
+                    serialized = [asdict(r) if hasattr(r, '__dataclass_fields__') else r for r in result]
+                    setattr(data, attr, serialized)
+                    if use_cache:
+                        cache.set_cached("suna", start_date, end_date, category, serialized)
+            except Exception as e:
+                data.warnings.append(f"Failed to fetch {category} from Suna: {e}")
+
     except (ValueError, ImportError):
-        pass  # Suna not configured — meals stay empty
+        pass  # Suna not configured — meals and scores stay empty
     except Exception as e:
-        data.warnings.append(f"Failed to fetch meals from Suna: {e}")
+        data.warnings.append(f"Failed to fetch from Suna API: {e}")
 
     # User profile (not cached by date range)
     try:

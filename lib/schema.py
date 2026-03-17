@@ -167,6 +167,53 @@ class MealRecord:
 
 
 @dataclass
+class GutScore:
+    """Daily gut health score from Suna API."""
+    day: str
+    provider: str = "suna"
+    score: Optional[int] = None               # 0-100
+    level: Optional[str] = None
+    components: Optional[dict] = None         # score breakdown (provider-defined)
+
+
+@dataclass
+class OvernightScore:
+    """Overnight score from Suna API."""
+    day: str
+    provider: str = "suna"
+    score: Optional[int] = None
+    level: Optional[str] = None
+    deviation: Optional[float] = None         # vs personal baseline
+    details: Optional[dict] = None            # provider-specific
+
+
+@dataclass
+class DigestiveState:
+    """Meal processing state from Suna API."""
+    day: str
+    provider: str = "suna"
+    meal_time: Optional[str] = None           # ISO 8601
+    meal_type: Optional[str] = None
+    duration_min: Optional[float] = None      # total processing time
+    phases: Optional[dict] = None             # provider-specific breakdown
+    confidence: Optional[float] = None
+
+
+@dataclass
+class DailyWindows:
+    """Daily timing windows from Suna API."""
+    day: str
+    provider: str = "suna"
+    eat_start: Optional[str] = None           # HH:MM
+    eat_end: Optional[str] = None
+    train_start: Optional[str] = None
+    train_end: Optional[str] = None
+    sleep_start: Optional[str] = None
+    recovery_level: Optional[str] = None
+    adjustments: Optional[dict] = None        # provider-specific modifiers
+
+
+@dataclass
 class UserProfile:
     provider: str
     age: Optional[int] = None
@@ -195,6 +242,12 @@ class BiometricData:
     respiration: list = field(default_factory=list)  # list[RespirationRecord]
     meals: list = field(default_factory=list)  # list[MealRecord]
     optimal_bedtime: Optional[str] = None
+    # Suna API scores (consumed, not computed here)
+    gut_scores: list = field(default_factory=list)  # list[GutScore]
+    overnight_scores: list = field(default_factory=list)  # list[OvernightScore]
+    digestive_states: list = field(default_factory=list)  # list[DigestiveState]
+    daily_windows: list = field(default_factory=list)  # list[DailyWindows]
+    suna_insights: list = field(default_factory=list)  # list[dict]
     warnings: list = field(default_factory=list)  # list[str] — fetch errors surfaced to user
 
     def to_dict(self):

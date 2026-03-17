@@ -37,7 +37,10 @@ from metrics import (compute_hrv_cv, compute_cross_modal_coupling,
                      compute_nutrition_periodization,
                      compute_hr_zones, compute_intensity_minutes,
                      compute_recovery_index, compute_sleep_efficiency,
-                     compute_workout_pace, compute_respiratory_trends)
+                     compute_workout_pace, compute_respiratory_trends,
+                     compute_personal_baselines, compute_correlation_discovery,
+                     compute_stress_proxy, compute_inflammation_proxy,
+                     compute_gut_score_correlations, compute_postmeal_hr_response)
 from dataclasses import asdict
 from datetime import datetime, timedelta
 from statistics import mean, stdev
@@ -561,6 +564,69 @@ if meals:
 else:
     print(f"\n--- NUTRITION x BIOMETRIC CROSSOVER ---")
     print(f"  No meal data available. Connect Suna for nutrition-biometric insights.")
+
+# --- PERSONAL BASELINE DEVIATIONS (NEW) ---
+print(f"\n--- PERSONAL BASELINES ---")
+spo2_data = d.get('spo2', [])
+stress_data = d.get('stress', [])
+resp_data = d.get('respiration', [])
+bl = compute_personal_baselines(sleep, readiness, spo2_data, stress_data, resp_data)
+if bl.get('status') == 'ok':
+    print(f"  {'Metric':<20} {'30d Avg':>8} {'SD':>6} {'7d':>8} {'Z':>6} {'Trend':>10}")
+    for mk in ['hrv', 'rhr', 'sleep_score', 'deep', 'rem', 'total_sleep',
+                'efficiency', 'readiness_score', 'temp_deviation']:
+        m = bl['metrics'].get(mk, {})
+        b30 = m.get('baselines', {}).get('30d', {})
+        c7 = m.get('current', {}).get('7d', {})
+        trend = m.get('trend_7d', '')
+        if b30.get('mean') is not None:
+            z_str = f"{c7['z_score']:+.1f}" if c7.get('z_score') is not None else ''
+            print(f"  {mk:<20} {b30['mean']:>8.1f} {b30['sd']:>6.2f} "
+                  f"{c7.get('value', ''):>8} {z_str:>6} {trend:>10}")
+else:
+    print(f"  Insufficient data ({bl.get('days', 0)} days)")
+
+# --- PATTERN DISCOVERY (NEW) ---
+disc = compute_correlation_discovery(d)
+if disc.get('status') == 'ok' and disc.get('correlations'):
+    print(f"\n--- PATTERN DISCOVERY ---")
+    for c in disc['correlations'][:8]:
+        sign = "+" if c['direction'] == 'positive' else "-"
+        print(f"  {sign} {c['feature']} → {c['outcome']} r={c['r']} (n={c['n']})")
+    best = disc.get('best_nights')
+    worst = disc.get('worst_nights')
+    if best and worst:
+        print(f"  Best nights (avg {best['avg_score']}): {', '.join(best.get('common_factors', []))}")
+        print(f"  Worst nights (avg {worst['avg_score']}): {', '.join(worst.get('common_factors', []))}")
+
+# --- ESTIMATE PROXIES (NEW) ---
+sp = compute_stress_proxy(sleep, readiness, meals)
+ip = compute_inflammation_proxy(sleep, readiness)
+if sp.get('stress_level') is not None or ip.get('inflammation_score') is not None:
+    print(f"\n--- ESTIMATE PROXIES (wearable-only) ---")
+    if sp.get('stress_level') is not None:
+        print(f"  Stress: {sp['stress_level']}/100 ({sp['level']})")
+    if ip.get('inflammation_score') is not None:
+        print(f"  Inflammation direction: {ip['inflammation_score']}/100 ({ip['inflammation_direction']})")
+
+# --- GUT INTELLIGENCE (NEW, if Suna connected) ---
+gut_scores = d.get('gut_scores', [])
+if gut_scores:
+    gc = compute_gut_score_correlations(gut_scores, sleep, d.get('workouts', []))
+    print(f"\n--- GUT INTELLIGENCE ---")
+    print(f"  Avg gut score: {gc.get('avg_score', 0)} ({gc.get('n_days', 0)} days)")
+    for k, v in gc.get('correlations', {}).items():
+        if abs(v) >= 0.15:
+            print(f"  {k}: r={v}")
+    if gc.get('best_day'):
+        print(f"  Best day: {gc['best_day']} | Worst: {gc.get('worst_day', '?')}")
+
+    # Post-meal HR (if meals + HR exist)
+    if meals and heartrate:
+        pmhr = compute_postmeal_hr_response(meals, heartrate)
+        if pmhr.get('n_meals_analyzed', 0) > 0:
+            for mt, s in pmhr.get('by_meal_type', {}).items():
+                print(f"  Post-meal HR ({mt}): +{s['avg_peak_delta']}bpm at {s['avg_time_to_peak']}min")
 
 PYEOF
 ```
