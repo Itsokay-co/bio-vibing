@@ -208,7 +208,8 @@ def fetch_biometrics_multi(
                 provider_name=pname, use_cache=use_cache,
             )
             datasets.append((pname, d))
-        except Exception:
+        except Exception as e:
+            print(f"multi-provider: {pname} failed: {e}", file=sys.stderr)
             continue
 
     if not datasets:
@@ -235,9 +236,11 @@ def fetch_biometrics_multi(
                 if r.get('day') not in existing_days:
                     getattr(base, key).append(r)
 
-        # Heartrate: merge all (timestamp-keyed, no conflicts)
+        # Timestamp-keyed records: merge all (no day-based dedup)
         for hr in dd.get('heartrate', []):
             base.heartrate.append(hr)
+        for gl in dd.get('glucose', []):
+            base.glucose.append(gl)
 
         # Meals: merge all
         for m in dd.get('meals', []):

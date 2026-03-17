@@ -265,6 +265,12 @@ def make_biometric_data(days=14, start="2025-01-01", **overrides):
         "body_composition": [],
         "respiration": respiration,
         "meals": [],
+        "glucose": [],
+        "gut_scores": [],
+        "overnight_scores": [],
+        "digestive_states": [],
+        "daily_windows": [],
+        "suna_insights": [],
         "optimal_bedtime": None,
         "warnings": [],
     }

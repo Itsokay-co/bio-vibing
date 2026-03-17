@@ -18,7 +18,7 @@ PROVIDERS = {
 }
 
 # Detection priority order
-DETECTION_ORDER = ["oura", "whoop", "fitbit", "garmin", "apple_health"]
+DETECTION_ORDER = ["oura", "whoop", "fitbit", "garmin", "apple_health", "nightscout", "dexcom"]
 
 
 def detect_provider() -> Optional[str]:

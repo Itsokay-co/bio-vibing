@@ -173,12 +173,10 @@ class SunaProvider:
             day=row.get("date", row.get("day", "")),
             score=row.get("score"),
             level=row.get("level"),
-            deviation=row.get("deviation", row.get("deviation_14d",
-                              row.get("deviation_from_baseline"))),
+            deviation=row.get("deviation", row.get("deviation_from_baseline")),
             details={k: v for k, v in row.items()
                      if k not in ("date", "day", "score", "level",
-                                  "deviation", "deviation_14d",
-                                  "deviation_from_baseline")} or None,
+                                  "deviation", "deviation_from_baseline")} or None,
         ) for row in data]
 
     def fetch_digestive_states(self, start_date: str, end_date: str) -> list:

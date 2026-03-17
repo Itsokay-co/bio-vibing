@@ -56,7 +56,7 @@ class DexcomProvider(BaseProvider):
                 "connected": True,
                 "info": f"Dexcom — data available",
             }
-        except Exception as e:
+        except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, OSError) as e:
             return {"connected": False, "info": str(e)}
 
     def fetch_user_profile(self):
@@ -64,32 +64,29 @@ class DexcomProvider(BaseProvider):
 
     def fetch_glucose(self, start_date, end_date):
         """Fetch estimated glucose values (EGVs) from Dexcom API v3."""
+        data = self._request(
+            "/v3/users/self/egvs",
+            {
+                "startDate": f"{start_date}T00:00:00",
+                "endDate": f"{end_date}T23:59:59",
+            },
+        )
         records = []
-        try:
-            data = self._request(
-                "/v3/users/self/egvs",
-                {
-                    "startDate": f"{start_date}T00:00:00",
-                    "endDate": f"{end_date}T23:59:59",
-                },
-            )
-            for rec in data.get("records", []):
-                ts = rec.get("displayTime") or rec.get("systemTime", "")
-                value = rec.get("value")
-                if not ts or value is None:
-                    continue
-                trend_name = rec.get("trend", "")
-                trend = _map_dexcom_trend(trend_name)
-                trend_rate = rec.get("trendRate")
-                records.append(GlucoseRecord(
-                    timestamp=ts,
-                    provider=self.name,
-                    value_mgdl=float(value),
-                    trend=trend,
-                    trend_rate=float(trend_rate) if trend_rate is not None else None,
-                ))
-        except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, KeyError) as e:
-            print(f"dexcom: fetch_glucose failed: {e}", file=sys.stderr)
+        for rec in data.get("records", []):
+            ts = rec.get("displayTime") or rec.get("systemTime", "")
+            value = rec.get("value")
+            if not ts or value is None:
+                continue
+            trend_name = rec.get("trend", "")
+            trend = _map_dexcom_trend(trend_name)
+            trend_rate = rec.get("trendRate")
+            records.append(GlucoseRecord(
+                timestamp=ts,
+                provider=self.name,
+                value_mgdl=float(value),
+                trend=trend,
+                trend_rate=float(trend_rate) if trend_rate is not None else None,
+            ))
         return records
 
     # --- Stubs for base class interface ---

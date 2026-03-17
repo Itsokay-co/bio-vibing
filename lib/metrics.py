@@ -4077,13 +4077,22 @@ def compute_postmeal_glucose(glucose: list, meals: list) -> dict:
 
     from datetime import datetime, timedelta
 
-    # Build sorted glucose timeline
-    gl_sorted = sorted(
-        [(g['timestamp'], g['value_mgdl']) for g in glucose
-         if g.get('timestamp') and g.get('value_mgdl') is not None],
-        key=lambda x: x[0],
-    )
-    if not gl_sorted:
+    def _parse_ts(s):
+        try:
+            return datetime.fromisoformat(s.replace('Z', '+00:00'))
+        except (ValueError, TypeError, AttributeError):
+            return None
+
+    # Build sorted glucose timeline as (datetime, value) tuples
+    gl_parsed = []
+    for g in glucose:
+        dt = _parse_ts(g.get('timestamp'))
+        v = g.get('value_mgdl')
+        if dt is not None and v is not None:
+            gl_parsed.append((dt, g['timestamp'], v))
+    gl_parsed.sort(key=lambda x: x[0])
+
+    if not gl_parsed:
         return {'responses': [], 'avg_peak_delta': None, 'interpretation': 'insufficient_data'}
 
     responses = []
@@ -4091,36 +4100,31 @@ def compute_postmeal_glucose(glucose: list, meals: list) -> dict:
         ts = m.get('timestamp')
         if not ts:
             continue
-        try:
-            meal_dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
-        except (ValueError, TypeError):
+        meal_dt = _parse_ts(ts)
+        if meal_dt is None:
             continue
 
         # Find glucose in 30min before meal (baseline) and 3h after (response)
-        baseline_start = (meal_dt - timedelta(minutes=30)).isoformat()
-        response_end = (meal_dt + timedelta(hours=3)).isoformat()
+        baseline_start = meal_dt - timedelta(minutes=30)
+        response_end = meal_dt + timedelta(hours=3)
 
-        pre_vals = [v for t, v in gl_sorted if baseline_start <= t <= ts]
-        post_vals = [(t, v) for t, v in gl_sorted if ts < t <= response_end]
+        pre_vals = [v for dt, raw_ts, v in gl_parsed if baseline_start <= dt <= meal_dt]
+        post_vals = [(raw_ts, dt, v) for dt, raw_ts, v in gl_parsed if meal_dt < dt <= response_end]
 
         if not pre_vals or len(post_vals) < 3:
             continue
 
         baseline = mean(pre_vals)
-        peak_val = max(v for _, v in post_vals)
+        peak_val = max(v for _, _, v in post_vals)
         peak_delta = peak_val - baseline
 
         # Time to peak
-        peak_ts = next(t for t, v in post_vals if v == peak_val)
-        try:
-            peak_dt = datetime.fromisoformat(peak_ts.replace('Z', '+00:00'))
-            ttp_min = (peak_dt - meal_dt).total_seconds() / 60
-        except (ValueError, TypeError):
-            ttp_min = None
+        peak_entry = next((raw_ts, dt, v) for raw_ts, dt, v in post_vals if v == peak_val)
+        ttp_min = (peak_entry[1] - meal_dt).total_seconds() / 60
 
         # 2h recovery value
-        recovery_start = (meal_dt + timedelta(hours=2)).isoformat()
-        recovery_vals = [v for t, v in post_vals if t >= recovery_start]
+        recovery_start = meal_dt + timedelta(hours=2)
+        recovery_vals = [v for _, dt, v in post_vals if dt >= recovery_start]
         recovery_val = mean(recovery_vals) if recovery_vals else None
 
         responses.append({

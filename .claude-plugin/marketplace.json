@@ -4,22 +4,24 @@
     "name": "itsokay-co"
   },
   "metadata": {
-    "description": "Biohacking skills for wearables — advanced biometric analysis with novel metrics. Supports Oura Ring, Whoop, Fitbit, and Apple Health.",
-    "version": "4.0.0"
+    "description": "Biohacker's toolbox — 45+ biometric analytics across 8 wearable providers, CGM glucose, and gut intelligence.",
+    "version": "5.0.0"
   },
   "plugins": [
     {
       "name": "bio-vibing",
-      "description": "Connect your wearable to Claude Code. Pull biometrics, analyze medication effects, get deep health reports. Supports Oura Ring, Whoop, Fitbit, and Apple Health.",
+      "description": "Connect wearables + CGM + nutrition to Claude Code. 45+ novel metrics, cycle detection, glucose analytics, pattern discovery. Supports Oura, Whoop, Fitbit, Apple Health, Garmin, Open Wearables, Dexcom, Nightscout.",
       "source": "./",
       "strict": false,
       "skills": [
         "./skills/connect",
         "./skills/pull",
+        "./skills/daily",
         "./skills/analyze",
+        "./skills/discover",
+        "./skills/gut",
         "./skills/smart-mode",
-        "./skills/weekly-report",
-        "./skills/glp1-profile"
+        "./skills/weekly-report"
       ]
     }
   ]

@@ -32,6 +32,10 @@ class NightscoutProvider(BaseProvider):
             )
 
         # Nightscout auth: SHA1 hash of API_SECRET
+        if not api_secret:
+            print("nightscout: NIGHTSCOUT_API_SECRET not set — requests will be "
+                  "unauthenticated. Set this if your instance requires auth.",
+                  file=sys.stderr)
         self.api_secret_hash = (
             hashlib.sha1(api_secret.encode()).hexdigest() if api_secret else ""
         )
@@ -54,7 +58,7 @@ class NightscoutProvider(BaseProvider):
                 "connected": True,
                 "info": f"Nightscout {data.get('version', 'unknown')} — {data.get('name', '')}",
             }
-        except Exception as e:
+        except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, OSError) as e:
             return {"connected": False, "info": str(e)}
 
     def fetch_user_profile(self):
@@ -62,31 +66,27 @@ class NightscoutProvider(BaseProvider):
 
     def fetch_glucose(self, start_date, end_date):
         """Fetch sensor glucose values (SGV) from Nightscout."""
+        params = {
+            "find[dateString][$gte]": f"{start_date}T00:00:00Z",
+            "find[dateString][$lte]": f"{end_date}T23:59:59Z",
+            "count": 10000,
+        }
+        data = self._request("/api/v1/entries/sgv.json", params)
         records = []
-        try:
-            params = {
-                "find[dateString][$gte]": f"{start_date}T00:00:00Z",
-                "find[dateString][$lte]": f"{end_date}T23:59:59Z",
-                "count": 10000,
-            }
-            data = self._request("/api/v1/entries/sgv.json", params)
-            for entry in data:
-                ts = entry.get("dateString", "")
-                sgv = entry.get("sgv")
-                if not ts or sgv is None:
-                    continue
-                # Map Nightscout direction to trend string
-                direction = entry.get("direction", "")
-                trend = _map_nightscout_trend(direction)
-                records.append(GlucoseRecord(
-                    timestamp=ts,
-                    provider=self.name,
-                    value_mgdl=float(sgv),
-                    trend=trend,
-                    trend_rate=entry.get("delta"),
-                ))
-        except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, KeyError) as e:
-            print(f"nightscout: fetch_glucose failed: {e}", file=sys.stderr)
+        for entry in data:
+            ts = entry.get("dateString", "")
+            sgv = entry.get("sgv")
+            if not ts or sgv is None:
+                continue
+            direction = entry.get("direction", "")
+            trend = _map_nightscout_trend(direction)
+            records.append(GlucoseRecord(
+                timestamp=ts,
+                provider=self.name,
+                value_mgdl=float(sgv),
+                trend=trend,
+                trend_rate=entry.get("delta"),
+            ))
         return records
 
     # --- Stubs for base class interface ---
