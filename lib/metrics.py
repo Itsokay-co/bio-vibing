@@ -4127,6 +4127,23 @@ def compute_postmeal_glucose(glucose: list, meals: list) -> dict:
         recovery_vals = [v for _, dt, v in post_vals if dt >= recovery_start]
         recovery_val = mean(recovery_vals) if recovery_vals else None
 
+        # Compute incremental AUC (iAUC) above baseline using trapezoidal rule
+        iauc_1h = 0
+        iauc_2h = 0
+        one_hour = meal_dt + timedelta(hours=1)
+        two_hour = meal_dt + timedelta(hours=2)
+        prev_dt, prev_v = meal_dt, baseline
+        for raw_ts_p, dt_p, v_p in post_vals:
+            delta_min = (dt_p - prev_dt).total_seconds() / 60
+            if delta_min > 0:
+                avg_above = ((prev_v - baseline) + (v_p - baseline)) / 2
+                if avg_above > 0:
+                    if dt_p <= one_hour:
+                        iauc_1h += avg_above * delta_min
+                    if dt_p <= two_hour:
+                        iauc_2h += avg_above * delta_min
+            prev_dt, prev_v = dt_p, v_p
+
         responses.append({
             'meal_type': m.get('meal_type'),
             'meal_time': ts,
@@ -4135,6 +4152,8 @@ def compute_postmeal_glucose(glucose: list, meals: list) -> dict:
             'peak_delta_mgdl': round(peak_delta, 1),
             'time_to_peak_min': round(ttp_min) if ttp_min else None,
             'recovery_2h_mgdl': round(recovery_val, 1) if recovery_val else None,
+            'iauc_1h': round(iauc_1h, 1),
+            'iauc_2h': round(iauc_2h, 1),
         })
 
     if not responses:
@@ -4206,6 +4225,381 @@ def compute_glucose_patterns(glucose: list) -> dict:
     }
 
 
+def compute_sleep_debt(sleep: list, optimal_hours: float = None) -> dict:
+    """Cumulative sleep debt using personal optimal or default target.
+
+    Tracks rolling 14-day debt, recovery trajectory, and days to payoff.
+    """
+    records = [(s.get('day', ''), s.get('total_sleep_seconds'))
+               for s in sleep
+               if s.get('day') and s.get('total_sleep_seconds')
+               and s.get('sleep_type') != 'nap']
+    records.sort()
+
+    if len(records) < 7:
+        return {'debt_hours': None, 'interpretation': 'insufficient_data'}
+
+    target = optimal_hours or 7.5  # use personal optimal if provided
+
+    # Rolling 14-day debt
+    window = records[-14:] if len(records) >= 14 else records
+    total_sleep_h = sum(secs / 3600 for _, secs in window)
+    total_target_h = target * len(window)
+    debt = round(total_target_h - total_sleep_h, 1)
+
+    # Weekly trajectory (last 7 vs previous 7)
+    if len(records) >= 14:
+        recent_7 = sum(secs / 3600 for _, secs in records[-7:]) / 7
+        prev_7 = sum(secs / 3600 for _, secs in records[-14:-7]) / 7
+        trajectory = 'improving' if recent_7 > prev_7 else 'worsening'
+    else:
+        recent_7 = sum(secs / 3600 for _, secs in records[-7:]) / min(7, len(records))
+        trajectory = 'unknown'
+
+    # Days to payoff (if sleeping optimal + 1h extra per night)
+    days_to_payoff = max(0, round(debt)) if debt > 0 else 0
+
+    return {
+        'debt_hours': debt,
+        'target_hours': target,
+        'avg_recent_hours': round(recent_7, 1),
+        'trajectory': trajectory,
+        'days_to_payoff': days_to_payoff,
+        'window_days': len(window),
+    }
+
+
+def compute_poincare_hrv(sleep: list) -> dict:
+    """Poincaré plot indices from consecutive nightly HRV values.
+
+    SD1: short-term variability (perpendicular to identity line)
+    SD2: long-term variability (along identity line)
+    SD1/SD2 < 1 = parasympathetic dominant, > 1 = sympathetic dominant
+    """
+    hrvs = [s.get('avg_hrv_ms') for s in sleep
+            if s.get('avg_hrv_ms') is not None and s.get('sleep_type') != 'nap']
+    if len(hrvs) < 7:
+        return {'sd1': None, 'sd2': None, 'ratio': None,
+                'interpretation': 'insufficient_data'}
+
+    # Consecutive pairs: x(n) vs x(n+1)
+    import math
+    diffs = [hrvs[i + 1] - hrvs[i] for i in range(len(hrvs) - 1)]
+    sums = [hrvs[i + 1] + hrvs[i] for i in range(len(hrvs) - 1)]
+
+    sd1 = math.sqrt(sum(d ** 2 for d in diffs) / (2 * len(diffs)))
+    sd2_var = sum((s - mean(sums)) ** 2 for s in sums) / len(sums)
+    sd2 = math.sqrt(sd2_var / 2) if sd2_var > 0 else 0
+
+    ratio = round(sd1 / sd2, 2) if sd2 > 0 else None
+
+    if ratio is not None:
+        if ratio < 0.8:
+            interp = 'parasympathetic_dominant'
+        elif ratio > 1.2:
+            interp = 'sympathetic_dominant'
+        else:
+            interp = 'balanced'
+    else:
+        interp = 'insufficient_data'
+
+    return {
+        'sd1': round(sd1, 1),
+        'sd2': round(sd2, 1),
+        'ratio': ratio,
+        'interpretation': interp,
+        'n_nights': len(hrvs),
+    }
+
+
+def compute_optimal_sleep(sleep: list, readiness: list = None) -> dict:
+    """Find personal optimal sleep duration from the user's own data.
+
+    Buckets sleep durations into 30-min bins, computes mean next-day
+    HRV/readiness per bin. The bin with highest outcome = optimal.
+    """
+    if not sleep or len(sleep) < 14:
+        return {'optimal_hours': None, 'current_avg_hours': None,
+                'interpretation': 'insufficient_data'}
+
+    # Build day -> (duration_hours, next_day_hrv) pairs
+    by_day = {}
+    for s in sleep:
+        day = s.get('day', '')
+        total = s.get('total_sleep_seconds')
+        if not day or not total or s.get('sleep_type') == 'nap':
+            continue
+        by_day[day] = {'hours': total / 3600, 'hrv': s.get('avg_hrv_ms')}
+
+    days = sorted(by_day.keys())
+    pairs = []
+    for i in range(len(days) - 1):
+        d = by_day[days[i]]
+        next_d = by_day.get(days[i + 1], {})
+        next_hrv = next_d.get('hrv')
+        if d['hours'] > 0 and next_hrv is not None:
+            pairs.append((d['hours'], next_hrv))
+
+    if len(pairs) < 10:
+        return {'optimal_hours': None, 'current_avg_hours': None,
+                'interpretation': 'insufficient_data'}
+
+    # Bucket into 30-min bins
+    bins = {}
+    for hours, hrv in pairs:
+        bucket = round(hours * 2) / 2  # round to nearest 0.5h
+        bins.setdefault(bucket, []).append(hrv)
+
+    # Find bin with highest mean HRV (minimum 3 data points per bin)
+    bin_means = {b: mean(vs) for b, vs in bins.items() if len(vs) >= 3}
+    if not bin_means:
+        return {'optimal_hours': None, 'current_avg_hours': None,
+                'interpretation': 'insufficient_data'}
+
+    optimal = max(bin_means, key=bin_means.get)
+    current_avg = round(mean([h for h, _ in pairs]), 1)
+    delta = round(optimal - current_avg, 1)
+
+    return {
+        'optimal_hours': optimal,
+        'current_avg_hours': current_avg,
+        'delta_hours': delta,
+        'bins': {str(b): {'mean_next_hrv': round(v, 1), 'n': len(bins[b])}
+                 for b, v in bin_means.items()},
+        'n_nights': len(pairs),
+    }
+
+
+def compute_disruption_classification(sleep: list, readiness: list = None,
+                                      spo2: list = None) -> dict:
+    """Classify disruption events as alcohol, illness, or overtraining.
+
+    Analyzes recovery curve shape after anomalous nights:
+    - V-shaped (1-night dip, next-day bounce) → probable alcohol
+    - U-shaped (multi-day suppression, gradual recovery) → probable illness
+    - L-shaped (sustained decline, no recovery) → probable overtraining/burnout
+    """
+    if not sleep or len(sleep) < 14:
+        return {'events': [], 'interpretation': 'insufficient_data'}
+
+    # Build daily metrics
+    daily = {}
+    for s in sleep:
+        day = s.get('day', '')
+        if not day or s.get('sleep_type') == 'nap':
+            continue
+        daily[day] = {
+            'hrv': s.get('avg_hrv_ms'),
+            'rhr': s.get('avg_resting_hr_bpm'),
+            'eff': s.get('efficiency'),
+            'deep': s.get('deep_sleep_seconds'),
+        }
+
+    # Add readiness temp if available
+    if readiness:
+        for r in readiness:
+            day = r.get('day', '')
+            if day in daily:
+                daily[day]['temp'] = r.get('temp_deviation_c')
+
+    # Add SpO2 if available
+    if spo2:
+        for sp in spo2:
+            day = sp.get('day', '')
+            if day in daily:
+                daily[day]['spo2'] = sp.get('avg_spo2_pct')
+
+    days = sorted(daily.keys())
+    if len(days) < 14:
+        return {'events': [], 'interpretation': 'insufficient_data'}
+
+    # Compute rolling baseline (7-day mean) for HRV and RHR
+    events = []
+    for i in range(7, len(days)):
+        day = days[i]
+        d = daily[day]
+        hrv = d.get('hrv')
+        rhr = d.get('rhr')
+        if hrv is None or rhr is None:
+            continue
+
+        # Baseline from preceding 7 days
+        baseline_hrv = []
+        baseline_rhr = []
+        for j in range(max(0, i - 7), i):
+            bh = daily[days[j]].get('hrv')
+            br = daily[days[j]].get('rhr')
+            if bh is not None:
+                baseline_hrv.append(bh)
+            if br is not None:
+                baseline_rhr.append(br)
+
+        if len(baseline_hrv) < 5 or len(baseline_rhr) < 5:
+            continue
+
+        mean_hrv = mean(baseline_hrv)
+        mean_rhr = mean(baseline_rhr)
+        sd_hrv = stdev(baseline_hrv) if len(baseline_hrv) > 1 else 1
+        sd_rhr = stdev(baseline_rhr) if len(baseline_rhr) > 1 else 1
+
+        # Detect anomalous night (>1.5 SD from baseline in either direction)
+        hrv_z = (hrv - mean_hrv) / sd_hrv if sd_hrv > 0 else 0
+        rhr_z = (rhr - mean_rhr) / sd_rhr if sd_rhr > 0 else 0
+
+        if hrv_z > -1.5 and rhr_z < 1.5:
+            continue  # Not anomalous
+
+        # Classify recovery curve by looking at next 1-5 days
+        recovery_days = []
+        for k in range(1, min(6, len(days) - i)):
+            rd = daily.get(days[i + k], {})
+            rh = rd.get('hrv')
+            rr = rd.get('rhr')
+            if rh is not None and rr is not None:
+                recovery_days.append({
+                    'day': days[i + k],
+                    'hrv_z': (rh - mean_hrv) / sd_hrv if sd_hrv > 0 else 0,
+                    'rhr_z': (rr - mean_rhr) / sd_rhr if sd_rhr > 0 else 0,
+                })
+
+        if not recovery_days:
+            continue
+
+        # Classify shape
+        day1_hrv_z = recovery_days[0]['hrv_z'] if recovery_days else 0
+        multi_day_suppressed = sum(1 for r in recovery_days if r['hrv_z'] < -0.5)
+        recovered_by_day2 = day1_hrv_z > -0.5
+
+        if recovered_by_day2 and multi_day_suppressed <= 1:
+            classification = 'probable_alcohol'
+            shape = 'V'
+        elif multi_day_suppressed >= 3:
+            # Check if there's eventual recovery
+            last_z = recovery_days[-1]['hrv_z'] if recovery_days else 0
+            if last_z > -0.5:
+                classification = 'probable_illness'
+                shape = 'U'
+            else:
+                classification = 'probable_overtraining'
+                shape = 'L'
+        elif multi_day_suppressed >= 2:
+            classification = 'probable_illness'
+            shape = 'U'
+        else:
+            classification = 'unclassified'
+            shape = '?'
+
+        events.append({
+            'day': day,
+            'hrv_z': round(hrv_z, 1),
+            'rhr_z': round(rhr_z, 1),
+            'classification': classification,
+            'recovery_shape': shape,
+            'days_to_recovery': next(
+                (k + 1 for k, r in enumerate(recovery_days) if r['hrv_z'] > -0.5), None
+            ),
+        })
+
+    return {
+        'events': events,
+        'n_disruptions': len(events),
+        'by_type': {
+            'alcohol': sum(1 for e in events if e['classification'] == 'probable_alcohol'),
+            'illness': sum(1 for e in events if e['classification'] == 'probable_illness'),
+            'overtraining': sum(1 for e in events if e['classification'] == 'probable_overtraining'),
+        },
+    }
+
+
+def compute_glucose_clinical(glucose: list) -> dict:
+    """Clinical CGM metrics: MAGE, MODD, LBGI, HBGI, GMI.
+
+    Standard metrics used by endocrinologists. Requires 24h+ of CGM data.
+    """
+    values = [g.get('value_mgdl') for g in glucose if g.get('value_mgdl') is not None]
+    if len(values) < 20:
+        return {'mage': None, 'modd': None, 'lbgi': None, 'hbgi': None, 'gmi': None,
+                'interpretation': 'insufficient_data', 'n_readings': len(values)}
+
+    avg = mean(values)
+
+    # GMI (Glucose Management Indicator) — estimated A1C
+    gmi = round(3.31 + 0.02392 * avg, 1)
+
+    # LBGI / HBGI (Blood Glucose Index)
+    # Kovatchev formula: transform glucose to symmetric scale, compute risk
+    import math
+    fbg_values = []
+    for v in values:
+        if v > 0:
+            f = 1.509 * (math.log(v) ** 1.084 - 5.381)
+            fbg_values.append(f)
+    rl_values = [10 * f ** 2 if f < 0 else 0 for f in fbg_values]
+    rh_values = [10 * f ** 2 if f > 0 else 0 for f in fbg_values]
+    lbgi = round(mean(rl_values), 1) if rl_values else 0
+    hbgi = round(mean(rh_values), 1) if rh_values else 0
+
+    # MAGE (Mean Amplitude of Glycemic Excursions)
+    # Find peaks and nadirs exceeding 1 SD, compute mean excursion amplitude
+    sd = stdev(values) if len(values) > 1 else 0
+    excursions = []
+    if sd > 0:
+        # Simple peak-nadir detection with 1-SD threshold
+        direction = None  # 'up' or 'down'
+        last_extreme = values[0]
+        for v in values[1:]:
+            if v > last_extreme + sd and direction != 'up':
+                if direction == 'down':
+                    excursions.append(abs(v - last_extreme))
+                direction = 'up'
+                last_extreme = v
+            elif v < last_extreme - sd and direction != 'down':
+                if direction == 'up':
+                    excursions.append(abs(last_extreme - v))
+                direction = 'down'
+                last_extreme = v
+            else:
+                if direction == 'up' and v > last_extreme:
+                    last_extreme = v
+                elif direction == 'down' and v < last_extreme:
+                    last_extreme = v
+    mage = round(mean(excursions), 1) if excursions else None
+
+    # MODD (Mean of Daily Differences)
+    # Compare same-time glucose readings across consecutive days
+    from datetime import datetime
+    by_time = {}  # hour -> {day -> value}
+    for g in glucose:
+        ts = g.get('timestamp', '')
+        v = g.get('value_mgdl')
+        if not ts or v is None:
+            continue
+        try:
+            dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
+            day = dt.strftime('%Y-%m-%d')
+            hour = dt.hour
+            by_time.setdefault(hour, {})[day] = v
+        except (ValueError, TypeError):
+            continue
+
+    daily_diffs = []
+    for hour, day_vals in by_time.items():
+        days = sorted(day_vals.keys())
+        for i in range(1, len(days)):
+            daily_diffs.append(abs(day_vals[days[i]] - day_vals[days[i - 1]]))
+    modd = round(mean(daily_diffs), 1) if daily_diffs else None
+
+    return {
+        'mage': mage,
+        'modd': modd,
+        'lbgi': lbgi,
+        'hbgi': hbgi,
+        'gmi': gmi,
+        'n_excursions': len(excursions),
+        'n_readings': len(values),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Orchestrator — single entry point for all metrics
 # ---------------------------------------------------------------------------
@@ -4261,6 +4655,10 @@ def compute_all(data: dict) -> dict:
 
         # Behavioral Patterns
         ('alcohol', compute_alcohol_detection, sleep),
+        ('disruption', compute_disruption_classification, sleep, readiness, spo2),
+        ('poincare', compute_poincare_hrv, sleep),
+        ('optimal_sleep', compute_optimal_sleep, sleep, readiness),
+        ('sleep_debt', compute_sleep_debt, sleep),
         ('allostatic', compute_allostatic_load, sleep, readiness, spo2, stress),
         ('early_warning', compute_early_warning_signals, sleep),
         ('entropy', compute_daily_entropy, sleep, readiness),
@@ -4291,6 +4689,7 @@ def compute_all(data: dict) -> dict:
         # Glucose analytics (CGM)
         ('glucose_variability', compute_glucose_variability, data.get('glucose', [])),
         ('glucose_patterns', compute_glucose_patterns, data.get('glucose', [])),
+        ('glucose_clinical', compute_glucose_clinical, data.get('glucose', [])),
 
         # Baselines, forward signals, estimates (batch 4 — Suna elevation)
         ('personal_baselines', compute_personal_baselines, sleep, readiness,
