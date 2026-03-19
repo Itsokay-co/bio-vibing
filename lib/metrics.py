@@ -4225,6 +4225,117 @@ def compute_glucose_patterns(glucose: list) -> dict:
     }
 
 
+def compute_food_hr_sensitivity(meals: list, heartrate: list) -> dict:
+    """Detect food sensitivities from post-meal HR recovery time.
+
+    For each food item, computes average time for HR to return to
+    pre-meal baseline after eating. Foods with consistently longer
+    recovery suggest sensitivity/intolerance.
+
+    Requires meals with food-level detail + HR timeseries.
+    """
+    if not meals or not heartrate:
+        return {'foods': {}, 'interpretation': 'insufficient_data'}
+
+    from datetime import datetime, timedelta
+
+    def _parse_ts(s):
+        try:
+            return datetime.fromisoformat(s.replace('Z', '+00:00'))
+        except (ValueError, TypeError, AttributeError):
+            return None
+
+    # Build sorted HR timeline
+    hr_parsed = []
+    for h in heartrate:
+        dt = _parse_ts(h.get('timestamp'))
+        bpm = h.get('bpm')
+        if dt is not None and bpm is not None:
+            hr_parsed.append((dt, bpm))
+    hr_parsed.sort()
+
+    if not hr_parsed:
+        return {'foods': {}, 'interpretation': 'insufficient_data'}
+
+    # For each meal, compute: pre-meal baseline HR, peak post-meal HR, time to return to baseline
+    food_recovery = {}  # food_name -> [recovery_minutes]
+
+    for m in meals:
+        ts = m.get('timestamp')
+        foods = m.get('foods') or []
+        if not ts or not foods:
+            continue
+        meal_dt = _parse_ts(ts)
+        if meal_dt is None:
+            continue
+
+        # Pre-meal baseline: avg HR in 30min before meal
+        baseline_start = meal_dt - timedelta(minutes=30)
+        pre_hrs = [bpm for dt, bpm in hr_parsed if baseline_start <= dt < meal_dt]
+        if len(pre_hrs) < 2:
+            continue
+        baseline_hr = mean(pre_hrs)
+
+        # Post-meal: find time to return within 5bpm of baseline (up to 3h)
+        response_end = meal_dt + timedelta(hours=3)
+        post_hrs = [(dt, bpm) for dt, bpm in hr_parsed if meal_dt < dt <= response_end]
+        if len(post_hrs) < 3:
+            continue
+
+        # Find when HR first returns to within 5bpm of baseline
+        recovery_min = None
+        for dt, bpm in post_hrs:
+            if abs(bpm - baseline_hr) <= 5:
+                recovery_min = (dt - meal_dt).total_seconds() / 60
+                break
+
+        if recovery_min is None:
+            recovery_min = 180  # never recovered in 3h window
+
+        # Attribute to each food in the meal
+        for f in foods:
+            name = f.get('name', '').lower().strip()
+            if name:
+                food_recovery.setdefault(name, []).append(recovery_min)
+
+    # Compute stats per food (minimum 3 observations)
+    food_stats = {}
+    all_recoveries = []
+    for name, times in food_recovery.items():
+        if len(times) >= 3:
+            avg = round(mean(times), 1)
+            food_stats[name] = {
+                'avg_recovery_min': avg,
+                'n_meals': len(times),
+                'min_recovery_min': round(min(times), 1),
+                'max_recovery_min': round(max(times), 1),
+            }
+            all_recoveries.extend(times)
+
+    if not food_stats:
+        return {'foods': {}, 'n_foods_analyzed': 0, 'interpretation': 'insufficient_data'}
+
+    # Flag foods with recovery > 1 SD above personal mean
+    overall_mean = mean(all_recoveries)
+    overall_sd = stdev(all_recoveries) if len(all_recoveries) > 1 else 0
+    threshold = overall_mean + overall_sd
+
+    for name, stats in food_stats.items():
+        if stats['avg_recovery_min'] > threshold:
+            stats['flag'] = 'slow_recovery'
+        else:
+            stats['flag'] = 'normal'
+
+    flagged = [n for n, s in food_stats.items() if s['flag'] == 'slow_recovery']
+
+    return {
+        'foods': food_stats,
+        'n_foods_analyzed': len(food_stats),
+        'overall_avg_recovery_min': round(overall_mean, 1),
+        'flagged_foods': flagged,
+    }
+
+
 def compute_sleep_debt(sleep: list, optimal_hours: float = None) -> dict:
     """Cumulative sleep debt using personal optimal or default target.
 
@@ -4511,6 +4622,111 @@ def compute_disruption_classification(sleep: list, readiness: list = None,
     }
 
 
+def compute_circadian_ssa(heartrate: list) -> dict:
+    """Singular Spectrum Analysis for circadian rhythm detection.
+
+    Non-parametric alternative to cosinor. Doesn't assume cosine shape.
+    Decomposes HR timeseries into trend + oscillatory + noise.
+    Extracts dominant period, amplitude, and phase.
+    """
+    if not heartrate or len(heartrate) < 200:
+        return {'period_hours': None, 'amplitude': None,
+                'interpretation': 'insufficient_data'}
+
+    from datetime import datetime
+    import math
+
+    # Build hourly HR averages
+    hourly = {}
+    for h in heartrate:
+        ts = h.get('timestamp', '')
+        bpm = h.get('bpm')
+        if not ts or bpm is None:
+            continue
+        try:
+            dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
+            key = dt.strftime('%Y-%m-%d-%H')
+            hourly.setdefault(key, []).append(bpm)
+        except (ValueError, TypeError):
+            continue
+
+    series = [mean(vs) for vs in hourly.values() if vs]
+    n = len(series)
+    if n < 48:  # need at least 2 days of hourly data
+        return {'period_hours': None, 'amplitude': None,
+                'interpretation': 'insufficient_data'}
+
+    # Center the series
+    avg = mean(series)
+    centered = [v - avg for v in series]
+
+    # SSA Step 1: Build trajectory matrix (window = 24h for circadian)
+    window = min(24, n // 3)
+    k = n - window + 1
+    # Build covariance matrix (window x window) using Toeplitz structure
+    # C[i][j] = (1/k) * sum(centered[m+i] * centered[m+j] for m in range(k))
+    cov = [[0.0] * window for _ in range(window)]
+    for i in range(window):
+        for j in range(i, window):
+            s = sum(centered[m + i] * centered[m + j] for m in range(k)) / k
+            cov[i][j] = s
+            cov[j][i] = s
+
+    # SSA Step 2: Power iteration to find dominant eigenvector
+    # (stdlib-only, no numpy — use power method for top eigenvector)
+    vec = [1.0 / math.sqrt(window)] * window
+    for _ in range(50):  # 50 iterations is plenty for convergence
+        new_vec = [sum(cov[i][j] * vec[j] for j in range(window)) for i in range(window)]
+        norm = math.sqrt(sum(v ** 2 for v in new_vec))
+        if norm == 0:
+            break
+        vec = [v / norm for v in new_vec]
+
+    eigenvalue = sum(sum(cov[i][j] * vec[j] for j in range(window)) * vec[i]
+                     for i in range(window))
+
+    # SSA Step 3: Reconstruct the dominant component
+    # Project trajectory matrix onto eigenvector
+    component = [0.0] * n
+    counts = [0] * n
+    for m in range(k):
+        proj = sum(centered[m + i] * vec[i] for i in range(window))
+        for i in range(window):
+            component[m + i] += proj * vec[i]
+            counts[m + i] += 1
+    component = [component[i] / counts[i] if counts[i] > 0 else 0 for i in range(n)]
+
+    # SSA Step 4: Estimate period from zero-crossings of component
+    crossings = []
+    for i in range(1, len(component)):
+        if component[i - 1] * component[i] < 0:
+            crossings.append(i)
+
+    if len(crossings) >= 2:
+        half_periods = [crossings[i + 1] - crossings[i] for i in range(len(crossings) - 1)]
+        period_hours = round(mean(half_periods) * 2, 1)
+    else:
+        period_hours = None
+
+    # Amplitude: peak-to-trough of the component
+    if component:
+        amplitude = round((max(component) - min(component)) / 2, 1)
+    else:
+        amplitude = None
+
+    # Variance explained
+    total_var = sum(c ** 2 for c in centered) / n
+    explained = eigenvalue / (total_var * window) if total_var > 0 else 0
+
+    return {
+        'period_hours': period_hours,
+        'amplitude': amplitude,
+        'variance_explained': round(explained, 3),
+        'n_hours': n,
+        'method': 'ssa',
+    }
+
+
 def compute_glucose_clinical(glucose: list) -> dict:
     """Clinical CGM metrics: MAGE, MODD, LBGI, HBGI, GMI.
 
@@ -4644,6 +4860,7 @@ def compute_all(data: dict) -> dict:
         ('hrv_cv', compute_hrv_cv, sleep),
         ('coupling', compute_cross_modal_coupling, sleep, readiness, spo2),
         ('circadian', compute_circadian_fingerprint, heartrate),
+        ('circadian_ssa', compute_circadian_ssa, heartrate),
         ('hrr', compute_heart_rate_recovery, workouts, heartrate),
 
         # Sleep Architecture
@@ -4721,6 +4938,7 @@ def compute_all(data: dict) -> dict:
             ('postmeal_hr', compute_postmeal_hr_response, meals, heartrate),
             ('caffeine_sleep', compute_caffeine_sleep_coupling, meals, sleep),
             ('food_effects', compute_food_item_effects, meals, sleep),
+            ('food_hr_sensitivity', compute_food_hr_sensitivity, meals, heartrate),
             ('bdi_meal', compute_bdi_meal_coupling, spo2, meals, sleep),
             ('postmeal_glucose', compute_postmeal_glucose, data.get('glucose', []), meals),
         ]
