@@ -31,6 +31,7 @@ from dataclasses import asdict
 from datetime import datetime, timedelta
 from statistics import mean, stdev
 from collections import defaultdict
+from metrics import compute_disruption_classification, compute_glucose_variability
 
 event_name = "$EVENT_NAME"
 event_dates_str = "$EVENT_DATES"
@@ -197,6 +198,22 @@ if gut_scores:
         print(f"    Post: {round(mean(post_gs))} avg (n={len(post_gs)})")
         diff = round(mean(post_gs) - mean(pre_gs))
         print(f"    Change: {'+' if diff>0 else ''}{diff}")
+
+# Disruption events in the analysis window
+disrupt = compute_disruption_classification(d.get('sleep', []), d.get('readiness', []), d.get('spo2', []))
+events_in_window = [e for e in disrupt.get('events', []) if e.get('day', '') >= event_dates[0]]
+if events_in_window:
+    print(f"\nDISRUPTION EVENTS (post-event):")
+    for e in events_in_window:
+        print(f"  {e['day']}: {e['classification'].replace('probable_', '')} ({e['recovery_shape']}-shape)")
+
+# Glucose context if CGM connected
+glucose = d.get('glucose', [])
+if glucose:
+    gv = compute_glucose_variability(glucose)
+    if gv.get('mean'):
+        print(f"\nGLUCOSE:")
+        print(f"  Mean: {gv['mean']} mg/dL | CV: {gv['cv']}% | TIR: {gv['time_in_range_pct']}%")
 
 print()
 PYEOF

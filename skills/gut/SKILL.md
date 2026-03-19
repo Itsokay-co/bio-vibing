@@ -26,7 +26,9 @@ from statistics import mean
 from metrics import (compute_postmeal_hr_response, compute_caffeine_sleep_coupling,
                      compute_food_item_effects, compute_bdi_meal_coupling,
                      compute_meal_sleep_effects, compute_meal_circadian_alignment,
-                     compute_gut_score_correlations, compute_digestive_state_biometrics)
+                     compute_gut_score_correlations, compute_digestive_state_biometrics,
+                     compute_food_hr_sensitivity, compute_glucose_variability,
+                     compute_glucose_clinical, compute_postmeal_glucose)
 
 data = fetch_biometrics(days=30)
 d = asdict(data)
@@ -182,6 +184,33 @@ if daily_windows:
         print(f"  Sleep: {latest_w['sleep_start']}")
     if latest_w.get('recovery_level'):
         print(f"  Recovery: {latest_w['recovery_level']}")
+
+# --- FOOD HR SENSITIVITY ---
+if meals and heartrate:
+    fhs = compute_food_hr_sensitivity(meals, heartrate)
+    if fhs.get('n_foods_analyzed', 0) > 0:
+        print(f"\n--- FOOD HR SENSITIVITY ({fhs['n_foods_analyzed']} foods) ---")
+        print(f"  Overall avg recovery: {fhs['overall_avg_recovery_min']}min")
+        if fhs.get('flagged_foods'):
+            print(f"  Slow recovery: {', '.join(fhs['flagged_foods'])}")
+        for name, stats in sorted(fhs.get('foods', {}).items(), key=lambda x: -x[1]['avg_recovery_min'])[:5]:
+            flag = " !" if stats['flag'] == 'slow_recovery' else ""
+            print(f"  {name}: {stats['avg_recovery_min']}min (n={stats['n_meals']}){flag}")
+
+# --- GLUCOSE (if CGM connected) ---
+glucose = d.get('glucose', [])
+if glucose:
+    gv = compute_glucose_variability(glucose)
+    gc = compute_glucose_clinical(glucose)
+    if gv.get('mean'):
+        print(f"\n--- GLUCOSE ---")
+        print(f"  Mean: {gv['mean']} | CV: {gv['cv']}% | TIR: {gv['time_in_range_pct']}%")
+        if gc.get('gmi'):
+            print(f"  GMI: {gc['gmi']}% | MAGE: {gc.get('mage', 'N/A')} | MODD: {gc.get('modd', 'N/A')}")
+    if meals:
+        pmg = compute_postmeal_glucose(glucose, meals)
+        if pmg.get('avg_peak_delta'):
+            print(f"  Post-meal: avg peak +{pmg['avg_peak_delta']}mg/dL at {pmg.get('avg_time_to_peak_min', '?')}min")
 
 if not meals:
     print("No meal data available. Connect Suna for nutrition-biometric insights.")

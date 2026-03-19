@@ -25,7 +25,9 @@ from dataclasses import asdict
 from metrics import (compute_personal_baselines, compute_forward_signals,
                      compute_training_load, compute_chronotype,
                      compute_allostatic_load, compute_alcohol_detection,
-                     compute_early_warning_signals, compute_stress_proxy)
+                     compute_early_warning_signals, compute_stress_proxy,
+                     compute_sleep_debt, compute_disruption_classification,
+                     compute_optimal_sleep)
 
 data = fetch_biometrics(days=30)
 d = asdict(data)
@@ -136,17 +138,24 @@ else:
 # --- WATCH ---
 watch_items = []
 
-# Sleep debt
-fs = compute_forward_signals(sleep, readiness, workouts)
-debt = fs.get('sleep_debt', {})
-if debt.get('weekly_debt_hours') and debt['weekly_debt_hours'] > 3:
-    ntc = debt.get('nights_to_clear')
-    msg = f"Sleep debt: {debt['weekly_debt_hours']}h"
-    if ntc:
-        msg += f" — clears in ~{ntc} nights"
-    watch_items.append(msg)
+# Sleep debt (personal optimal target)
+sd = compute_sleep_debt(sleep)
+if sd.get('debt_hours') and sd['debt_hours'] > 5:
+    watch_items.append(f"Sleep debt: {sd['debt_hours']}h ({sd['avg_recent_hours']}h avg vs {sd['target_hours']}h target, {sd['trajectory']})")
+
+# Optimal sleep delta
+os_result = compute_optimal_sleep(sleep, readiness)
+if os_result.get('delta_hours') and os_result['delta_hours'] > 1:
+    watch_items.append(f"Sleeping {abs(os_result['delta_hours'])}h below your optimal ({os_result['optimal_hours']}h)")
+
+# Disruption detection
+disruption = compute_disruption_classification(sleep, readiness, spo2)
+recent_events = [e for e in disruption.get('events', []) if e.get('day', '') >= (long_sleep[-1]['day'] if long_sleep else '')]
+for e in recent_events[-1:]:
+    watch_items.append(f"Disruption: {e['classification'].replace('probable_', '')} detected ({e['recovery_shape']}-shape recovery)")
 
 # HRV declining
+fs = compute_forward_signals(sleep, readiness, workouts)
 hrv_proj = fs.get('hrv_projection', {})
 if hrv_proj.get('direction') == 'declining' and abs(hrv_proj.get('slope_per_day', 0)) > 0.5:
     watch_items.append(f"HRV declining ({hrv_proj['slope_per_day']}/day over 7 days)")

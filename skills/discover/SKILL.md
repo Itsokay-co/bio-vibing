@@ -23,7 +23,8 @@ sys.path.insert(0, os.path.join(os.environ.get('CLAUDE_PLUGIN_ROOT', '.'), 'lib'
 from fetch import fetch_biometrics
 from dataclasses import asdict
 from metrics import (compute_correlation_discovery, compute_gut_score_correlations,
-                     compute_caffeine_sleep_coupling, compute_food_item_effects)
+                     compute_caffeine_sleep_coupling, compute_food_item_effects,
+                     compute_food_hr_sensitivity, compute_disruption_classification)
 
 data = fetch_biometrics(days=60)
 d = asdict(data)
@@ -88,6 +89,30 @@ if meals:
             effects_str = ', '.join(f"{m}: d={v['cohens_d']} ({v['direction']})"
                                     for m, v in metrics.items())
             print(f"  {name} (n={n}): {effects_str}")
+        print()
+
+# --- FOOD HR SENSITIVITY ---
+    heartrate = d.get('heartrate', [])
+    fhs = compute_food_hr_sensitivity(meals, heartrate)
+    if fhs.get('n_foods_analyzed', 0) > 0:
+        print(f"FOOD HR SENSITIVITY ({fhs['n_foods_analyzed']} foods, avg recovery {fhs['overall_avg_recovery_min']}min):")
+        if fhs.get('flagged_foods'):
+            print(f"  Slow recovery foods: {', '.join(fhs['flagged_foods'])}")
+        for name, stats in sorted(fhs.get('foods', {}).items(), key=lambda x: -x[1]['avg_recovery_min'])[:5]:
+            flag = " ⚠" if stats['flag'] == 'slow_recovery' else ""
+            print(f"  {name}: {stats['avg_recovery_min']}min avg recovery (n={stats['n_meals']}){flag}")
+        print()
+
+# --- DISRUPTION HISTORY ---
+    disrupt = compute_disruption_classification(d.get('sleep', []), d.get('readiness', []), d.get('spo2', []))
+    if disrupt.get('n_disruptions', 0) > 0:
+        by_type = disrupt.get('by_type', {})
+        print(f"DISRUPTION EVENTS ({disrupt['n_disruptions']} detected):")
+        for dtype, count in by_type.items():
+            if count:
+                print(f"  {dtype}: {count}")
+        for e in disrupt.get('events', [])[-5:]:
+            print(f"  {e['day']}: {e['classification']} ({e['recovery_shape']}-shape, {e.get('days_to_recovery', '?')}d recovery)")
         print()
 
 # --- GUT SCORE PATTERNS (if Suna connected) ---

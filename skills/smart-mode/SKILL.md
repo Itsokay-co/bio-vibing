@@ -40,7 +40,9 @@ from metrics import (compute_hrv_cv, compute_cross_modal_coupling,
                      compute_workout_pace, compute_respiratory_trends,
                      compute_personal_baselines, compute_correlation_discovery,
                      compute_stress_proxy, compute_inflammation_proxy,
-                     compute_gut_score_correlations, compute_postmeal_hr_response)
+                     compute_gut_score_correlations, compute_postmeal_hr_response,
+                     compute_disruption_classification, compute_poincare_hrv,
+                     compute_optimal_sleep, compute_sleep_debt)
 from dataclasses import asdict
 from datetime import datetime, timedelta
 from statistics import mean, stdev
@@ -608,6 +610,31 @@ if sp.get('stress_level') is not None or ip.get('inflammation_score') is not Non
         print(f"  Stress: {sp['stress_level']}/100 ({sp['level']})")
     if ip.get('inflammation_score') is not None:
         print(f"  Inflammation direction: {ip['inflammation_score']}/100 ({ip['inflammation_direction']})")
+
+# --- NOVEL METRICS ---
+poincare = compute_poincare_hrv(sleep)
+if poincare.get('ratio') is not None:
+    print(f"\n--- AUTONOMIC BALANCE ---")
+    print(f"  Poincaré SD1/SD2: {poincare['ratio']} ({poincare['interpretation']})")
+    print(f"  SD1 (short-term): {poincare['sd1']}ms | SD2 (long-term): {poincare['sd2']}ms")
+
+opt_sleep = compute_optimal_sleep(sleep, readiness)
+sdebt = compute_sleep_debt(sleep)
+if opt_sleep.get('optimal_hours') or sdebt.get('debt_hours'):
+    print(f"\n--- SLEEP OPTIMIZATION ---")
+    if opt_sleep.get('optimal_hours'):
+        print(f"  Your optimal: {opt_sleep['optimal_hours']}h (current avg: {opt_sleep['current_avg_hours']}h, delta: {opt_sleep['delta_hours']:+.1f}h)")
+    if sdebt.get('debt_hours') is not None:
+        print(f"  14-day debt: {sdebt['debt_hours']}h ({sdebt['trajectory']})")
+
+disrupt = compute_disruption_classification(sleep, readiness, spo2)
+if disrupt.get('n_disruptions', 0) > 0:
+    print(f"\n--- DISRUPTION EVENTS ---")
+    by_type = disrupt.get('by_type', {})
+    parts = [f"{k}: {v}" for k, v in by_type.items() if v]
+    print(f"  {disrupt['n_disruptions']} events — {', '.join(parts)}")
+    for e in disrupt.get('events', [])[-5:]:
+        print(f"  {e['day']}: {e['classification'].replace('probable_', '')} ({e['recovery_shape']}-shape, {e.get('days_to_recovery', '?')}d recovery)")
 
 # --- GUT INTELLIGENCE (NEW, if Suna connected) ---
 gut_scores = d.get('gut_scores', [])

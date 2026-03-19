@@ -29,7 +29,9 @@ from metrics import (compute_hrv_cv, compute_sleep_regularity,
                      compute_hr_zones, compute_intensity_minutes,
                      compute_recovery_index, compute_respiratory_trends,
                      compute_personal_baselines, compute_forward_signals,
-                     compute_gut_score_correlations)
+                     compute_gut_score_correlations,
+                     compute_sleep_debt, compute_disruption_classification,
+                     compute_poincare_hrv)
 from dataclasses import asdict
 from datetime import datetime, timedelta
 from statistics import mean, stdev
@@ -398,6 +400,27 @@ if gut_scores:
         for k, v in corr.items():
             if abs(v) >= 0.2:
                 print(f"  {k}: r={v}")
+
+# --- SLEEP DEBT + DISRUPTIONS ---
+sdebt = compute_sleep_debt(sleep)
+if sdebt.get('debt_hours') is not None and sdebt['debt_hours'] > 3:
+    print("SLEEP DEBT")
+    print(f"  14-day debt: {sdebt['debt_hours']}h ({sdebt['avg_recent_hours']}h avg vs {sdebt['target_hours']}h target)")
+    print(f"  Trajectory: {sdebt['trajectory']}")
+    print()
+
+disrupt = compute_disruption_classification(sleep, readiness, spo2)
+this_week_events = [e for e in disrupt.get('events', []) if e.get('day', '') >= this_week_start]
+if this_week_events:
+    print("DISRUPTIONS THIS WEEK")
+    for e in this_week_events:
+        print(f"  {e['day']}: {e['classification'].replace('probable_', '')} ({e['recovery_shape']}-shape, {e.get('days_to_recovery', '?')}d recovery)")
+    print()
+
+poincare = compute_poincare_hrv(sleep)
+if poincare.get('ratio') is not None:
+    print(f"AUTONOMIC: Poincaré SD1/SD2 = {poincare['ratio']} ({poincare['interpretation']})")
+    print()
 
 print()
 PYEOF
