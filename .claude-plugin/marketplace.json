@@ -4,13 +4,13 @@
     "name": "itsokay-co"
   },
   "metadata": {
-    "description": "Biohacker's toolbox — 45+ biometric analytics across 8 wearable providers, CGM glucose, and gut intelligence.",
+    "description": "Biohacker's toolbox — 45+ biometric analytics across 9 providers: wearables, CGM glucose, and Suna gut intelligence.",
     "version": "5.0.0"
   },
   "plugins": [
     {
       "name": "bio-vibing",
-      "description": "Connect wearables + CGM + nutrition to Claude Code. 45+ novel metrics, cycle detection, glucose analytics, pattern discovery. Supports Oura, Whoop, Fitbit, Apple Health, Garmin, Open Wearables, Dexcom, Nightscout.",
+      "description": "Connect wearables + CGM + Suna gut intelligence to Claude Code. 45+ novel metrics, cycle detection, glucose analytics, pattern discovery. Supports Oura, Whoop, Fitbit, Apple Health, Garmin, Open Wearables, Dexcom, Nightscout, Suna.",
       "source": "./",
       "strict": false,
       "skills": [

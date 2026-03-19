@@ -2,9 +2,9 @@
 
 Biohacker's toolbox — 45+ biometric analytics via Claude Code.
 
-Connect wearables, CGM, and nutrition. Pull biometrics. Discover patterns. Track interventions. All from your terminal.
+Connect wearables, CGM, and gut intelligence. Pull biometrics. Discover patterns. Track interventions. All from your terminal.
 
-Supports: **Oura** | **Whoop** | **Fitbit** | **Apple Health** | **Garmin** | **Open Wearables** | **Dexcom** | **Nightscout**
+Supports: **Oura** | **Whoop** | **Fitbit** | **Apple Health** | **Garmin** | **Open Wearables** | **Dexcom** | **Nightscout** | **Suna**
 
 ## Setup
 
@@ -20,6 +20,7 @@ Supports: **Oura** | **Whoop** | **Fitbit** | **Apple Health** | **Garmin** | **
 | **Open Wearables** | Self-host [openwearables.io](https://openwearables.io) → create API key |
 | **Dexcom CGM** | [developer.dexcom.com](https://developer.dexcom.com) → OAuth2 → access token |
 | **Nightscout CGM** | Your Nightscout URL + API secret |
+| **Suna** | [suna.health](https://suna.health) → API key from developer portal |
 
 ### 2. Set the token
 
@@ -43,9 +44,11 @@ claude --plugin-dir /path/to/bio-vibing
 | `/bio-vibing:daily` | Morning briefing with baseline context | "How did I sleep?" |
 | `/bio-vibing:analyze` | Before/after event comparison | `/bio-vibing:analyze "Quit caffeine" 2026-02-01` |
 | `/bio-vibing:discover` | Automated pattern discovery | "What correlates with my best sleep?" |
-| `/bio-vibing:gut` | Nutrition-biometric crossover analysis | "How do meals affect my sleep?" |
+| `/bio-vibing:gut` | Gut intelligence + nutrition crossover | "How do meals affect my sleep?" |
 | `/bio-vibing:smart-mode` | Deep 60-day analysis (45+ metrics) | "What does my data mean?" |
 | `/bio-vibing:weekly-report` | This week vs last week + coaching | "How was my week?" |
+
+`/gut` and `/discover` unlock nutrition-biometric crossover when Suna is connected.
 
 ## How it works
 
@@ -53,25 +56,30 @@ claude --plugin-dir /path/to/bio-vibing
 Wearable APIs → Provider Adapter → Normalized Schema → 45+ Metrics → Skills
                                         ↓
                                   CGM (Dexcom/Nightscout)
-                                  Nutrition (Suna API)
+                                  Gut Intelligence (Suna)
 ```
 
 Auto-detects your wearable from env vars. All data normalizes to a common schema, so skills work the same regardless of device. Multiple wearables? Set `BIOMETRIC_PROVIDER=oura` to pick one.
 
 ## Provider coverage
 
-| Metric | Oura | Whoop | Fitbit | Apple | Garmin | OW | Dexcom | Nightscout |
-|--------|:----:|:-----:|:------:|:-----:|:------:|:--:|:------:|:----------:|
-| Sleep stages | Y | Y | Y | Y | Y | Y | - | - |
-| HRV | Y | Y | Y | Y* | - | Y | - | - |
-| Resting HR | Y | Y | Y | Y | Y | Y | - | - |
-| Readiness | Y | Y | - | Y | - | Y | - | - |
-| Temperature | Y | Y | - | Y | - | Y | - | - |
-| Steps | Y | - | Y | Y | Y | Y | - | - |
-| Workouts | Y | Y | Y | Y | Y | Y | - | - |
-| Body composition | - | - | - | Y | Y | Y | - | - |
-| Glucose (5-min) | - | - | - | - | - | - | Y | Y |
-| Stress | Y | - | - | - | - | Y | - | - |
+| Data | Oura | Whoop | Fitbit | Apple | Garmin | OW | Dexcom | Nightscout | Suna |
+|------|:----:|:-----:|:------:|:-----:|:------:|:--:|:------:|:----------:|:----:|
+| Sleep stages | Y | Y | Y | Y | Y | Y | - | - | - |
+| HRV | Y | Y | Y | Y* | - | Y | - | - | - |
+| Resting HR | Y | Y | Y | Y | Y | Y | - | - | - |
+| Temperature | Y | Y | - | Y | - | Y | - | - | - |
+| Steps | Y | - | Y | Y | Y | Y | - | - | - |
+| Workouts | Y | Y | Y | Y | Y | Y | - | - | - |
+| Body composition | - | - | - | Y | Y | Y | - | - | - |
+| Readiness | Y | Y | - | Y | - | Y | - | - | - |
+| Glucose (5-min) | - | - | - | - | - | - | Y | Y | - |
+| Stress | Y | - | - | - | - | Y | - | - | - |
+| Meals + nutrition | - | - | - | - | - | - | - | - | Y |
+| Gut scores | - | - | - | - | - | - | - | - | Y |
+| Digestive states | - | - | - | - | - | - | - | - | Y |
+| Timing windows | - | - | - | - | - | - | - | - | Y |
+| Overnight scores | - | - | - | - | - | - | - | - | Y |
 
 \* Apple Health uses SDNN; others use RMSSD.
 
@@ -84,6 +92,7 @@ Auto-detects your wearable from env vars. All data normalizes to a common schema
 - **Behavioral**: alcohol detection, allostatic load, early warning signals, entropy
 - **Glucose**: variability (CV, time-in-range), post-meal response curves, dawn phenomenon
 - **Nutrition**: meal-sleep effects, caffeine-sleep coupling, food item effects, macro-HRV coupling
+- **Gut Intelligence**: gut score correlations, digestive state biometrics, overnight score trends
 - **Signals**: personal baselines (z-scores), forward signals, stress/inflammation proxies
 - **Discovery**: automated correlation discovery across all data
 
