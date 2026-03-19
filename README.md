@@ -65,23 +65,25 @@ Auto-detects your wearable from env vars. All data normalizes to a common schema
 
 | Data | Oura | Whoop | Fitbit | Apple | Garmin | OW | Dexcom | Nightscout | Suna |
 |------|:----:|:-----:|:------:|:-----:|:------:|:--:|:------:|:----------:|:----:|
-| Sleep stages | Y | Y | Y | Y | Y | Y | - | - | - |
-| HRV | Y | Y | Y | Y* | - | Y | - | - | - |
-| Resting HR | Y | Y | Y | Y | Y | Y | - | - | - |
-| Temperature | Y | Y | - | Y | - | Y | - | - | - |
-| Steps | Y | - | Y | Y | Y | Y | - | - | - |
-| Workouts | Y | Y | Y | Y | Y | Y | - | - | - |
+| Sleep stages | Y | Y | Y | Y | Y | Y | - | - | Y |
+| HRV | Y | Y | Y | Y* | - | Y | - | - | Y |
+| Resting HR | Y | Y | Y | Y | Y | Y | - | - | Y |
+| Temperature | Y | Y | - | Y | - | Y | - | - | Y |
+| SpO2 | Y | Y | - | Y | - | - | - | - | Y |
+| Steps / activity | Y | - | Y | Y | Y | Y | - | - | Y |
+| Workouts | Y | Y | Y | Y | Y | Y | - | - | Y |
+| Respiratory rate | - | - | - | Y | - | Y | - | - | Y |
 | Body composition | - | - | - | Y | Y | Y | - | - | - |
-| Readiness | Y | Y | - | Y | - | Y | - | - | - |
-| Glucose (5-min) | - | - | - | - | - | - | Y | Y | - |
-| Stress | Y | - | - | - | - | Y | - | - | - |
+| Readiness | Y | Y | - | Y | - | Y | - | - | Y |
+| Stress | Y | - | - | - | - | Y | - | - | Y |
+| Glucose (5-min) | - | - | - | - | - | - | Y | Y | est. |
 | Meals + nutrition | - | - | - | - | - | - | - | - | Y |
 | Gut scores | - | - | - | - | - | - | - | - | Y |
 | Digestive states | - | - | - | - | - | - | - | - | Y |
 | Timing windows | - | - | - | - | - | - | - | - | Y |
 | Overnight scores | - | - | - | - | - | - | - | - | Y |
 
-\* Apple Health uses SDNN; others use RMSSD.
+\* Apple Health uses SDNN; others use RMSSD. Suna glucose marked "est." = estimated peak timing, not continuous CGM.
 
 ## Analytics
 
