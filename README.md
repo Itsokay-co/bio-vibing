@@ -100,7 +100,7 @@ Auto-detects your wearable from env vars. All data normalizes to a common schema
 
 ## Built by
 
-[Chad](https://github.com/itsokay-co) — physician, builder, co-founder of [SUNA Health](https://suna.health).
+[Chad](https://github.com/itsokay-co) physician, builder, founder of [SUNA Health](https://suna.health).
 
 ## License
 
