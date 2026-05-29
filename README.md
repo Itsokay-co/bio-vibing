@@ -1,6 +1,6 @@
 # bio-vibing
 
-Biohacker's toolbox — 45+ biometric analytics via Claude Code.
+Biohacker's toolbox 45+ biometric analytics via Claude Code.
 
 Connect wearables, CGM, and gut intelligence. Pull biometrics. Discover patterns. Track interventions. All from your terminal.
 
